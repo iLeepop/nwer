@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::{OutlineCategory, Project};
 
 use super::atomic_write;
+use super::path_validation::validate_storage_name;
 
 /// 章节树放置规则违规。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,8 @@ pub enum RuleViolation {
     MaxDepthExceeded { attempted: u32, max_depth: u32 },
     /// 父路径不在 `chapters/` 下。
     OutsideChaptersRoot,
+    /// 读取目录内容时发生 IO 错误。
+    Io(std::io::ErrorKind),
 }
 
 impl std::fmt::Display for RuleViolation {
@@ -34,6 +37,9 @@ impl std::fmt::Display for RuleViolation {
             }
             RuleViolation::OutsideChaptersRoot => {
                 write!(f, "path is outside the chapters root")
+            }
+            RuleViolation::Io(kind) => {
+                write!(f, "failed to inspect directory: {kind}")
             }
         }
     }
@@ -139,9 +145,7 @@ pub fn create_project(
     now: DateTime<Utc>,
 ) -> Result<(PathBuf, Project)> {
     let title = title.into();
-    if title.trim().is_empty() {
-        bail!("project title must not be empty");
-    }
+    validate_storage_name(&title)?;
 
     fs::create_dir_all(projects_root)
         .with_context(|| format!("failed to create projects root {}", projects_root.display()))?;
@@ -238,8 +242,7 @@ fn check_placement(
         return Ok(());
     }
 
-    let (has_dirs, has_chapters) =
-        classify_children(parent_dir).map_err(|_| RuleViolation::OutsideChaptersRoot)?;
+    let (has_dirs, has_chapters) = classify_children(parent_dir).map_err(RuleViolation::Io)?;
 
     match kind {
         PlacementKind::Directory if has_chapters => Err(RuleViolation::MixedChildren),
@@ -248,13 +251,13 @@ fn check_placement(
     }
 }
 
-fn classify_children(dir: &Path) -> std::io::Result<(bool, bool)> {
+fn classify_children(dir: &Path) -> Result<(bool, bool), std::io::ErrorKind> {
     let mut has_dirs = false;
     let mut has_chapters = false;
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
+    for entry in fs::read_dir(dir).map_err(|e| e.kind())? {
+        let entry = entry.map_err(|e| e.kind())?;
+        let file_type = entry.file_type().map_err(|e| e.kind())?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
@@ -325,6 +328,45 @@ mod tests {
         create_project(root.path(), "同名", now()).unwrap();
         let err = create_project(root.path(), "同名", now()).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn create_project_rejects_invalid_title() {
+        let root = tempdir().unwrap();
+        for title in ["", "  ", "../escape", "foo/bar", ".."] {
+            let err = create_project(root.path(), title, now()).unwrap_err();
+            assert!(
+                !err.to_string().contains("already exists"),
+                "title {title:?} should fail validation, not duplicate check"
+            );
+        }
+    }
+
+    #[test]
+    fn io_error_from_classify_children_is_not_outside_chapters_root() {
+        let root = tempdir().unwrap();
+        let chapters = root.path().join("chapters");
+        fs::create_dir_all(&chapters).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&chapters, fs::Permissions::from_mode(0o000)).unwrap();
+            let err = check_can_create_chapter(&chapters, &chapters, 3).unwrap_err();
+            assert!(matches!(err, RuleViolation::Io(_)));
+            assert_ne!(err, RuleViolation::OutsideChaptersRoot);
+            fs::set_permissions(&chapters, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Non-Unix: use a path under chapters that does not exist as parent
+            // (outside root is tested separately); skip permission-based IO test.
+            let outside = root.path().join("not-chapters");
+            let err = check_can_create_chapter(&chapters, &outside, 3).unwrap_err();
+            assert_eq!(err, RuleViolation::OutsideChaptersRoot);
+        }
     }
 
     #[test]
