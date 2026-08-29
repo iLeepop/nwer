@@ -43,21 +43,12 @@ impl Default for UiState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AiContext {
     #[serde(default)]
     pub style_guide: String,
     #[serde(default)]
     pub synopsis: String,
-}
-
-impl Default for AiContext {
-    fn default() -> Self {
-        Self {
-            style_guide: String::new(),
-            synopsis: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,16 +94,14 @@ mod tests {
     fn project_roundtrip_json() {
         let created = Utc.with_ymd_and_hms(2026, 8, 29, 8, 0, 0).unwrap();
         let updated = Utc.with_ymd_and_hms(2026, 8, 29, 9, 0, 0).unwrap();
-        let chapter_id =
-            Uuid::from_str("0198f86d-55be-7000-8000-000000000002").unwrap();
+        let chapter_id = Uuid::from_str("0198f86d-55be-7000-8000-000000000002").unwrap();
 
         let mut project = Project::new("示例小说", created);
         project.id = Uuid::from_str("0198f86d-55be-7000-8000-000000000001").unwrap();
         project.updated_at = updated;
         project.last_opened_chapter = Some(chapter_id);
         project.total_word_count = 128_403;
-        project.ui_state.expanded_nodes =
-            vec!["vol-001第一卷".into(), "part-001上篇".into()];
+        project.ui_state.expanded_nodes = vec!["vol-001第一卷".into(), "part-001上篇".into()];
         project.ai_context.style_guide = "第三人称有限视角，古风".into();
         project.ai_context.synopsis = "少年修仙成长史".into();
 
@@ -125,10 +114,10 @@ mod tests {
 
         let parsed: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, project);
-        assert_eq!(parsed.settings.word_count_exclude_types, vec![
-            BlockType::Note,
-            BlockType::SceneBreak,
-        ]);
+        assert_eq!(
+            parsed.settings.word_count_exclude_types,
+            vec![BlockType::Note, BlockType::SceneBreak,]
+        );
     }
 
     #[test]

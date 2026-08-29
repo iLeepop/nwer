@@ -66,11 +66,7 @@ pub struct OutlineEntry {
 }
 
 impl OutlineEntry {
-    pub fn new(
-        key: impl Into<String>,
-        category: OutlineCategory,
-        now: DateTime<Utc>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, category: OutlineCategory, now: DateTime<Utc>) -> Self {
         Self {
             schema_version: 1,
             id: Uuid::now_v7(),
@@ -92,9 +88,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 29, 8, 0, 0).unwrap();
         let mut entry = OutlineEntry::new("张三", OutlineCategory::Character, now);
         entry.fields.insert("年龄".into(), "18".into());
-        entry
-            .fields
-            .insert("身份".into(), "青云门外门弟子".into());
+        entry.fields.insert("身份".into(), "青云门外门弟子".into());
         entry.fields.insert("性格".into(), "沉稳内敛".into());
         entry.meta.updated_at = Utc.with_ymd_and_hms(2026, 8, 29, 8, 5, 0).unwrap();
 

@@ -37,11 +37,7 @@ impl Chapter {
             schema_version: 1,
             id: Uuid::now_v7(),
             title: title.into(),
-            blocks: vec![Block::new(
-                super::BlockType::Narration,
-                String::new(),
-                now,
-            )],
+            blocks: vec![Block::new(super::BlockType::Narration, String::new(), now)],
             meta: ChapterMeta::default(),
         }
     }
