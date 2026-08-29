@@ -4174,10 +4174,17 @@ name = "nwer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "dirs",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-script",
+ "uuid",
 ]
 
 [[package]]

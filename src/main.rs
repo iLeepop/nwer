@@ -1,6 +1,10 @@
 use gpui::*;
 use gpui_component::{button::*, *};
 
+// 数据模型在 lib crate（`nwer::models`）；阶段 1 仅挂接，不改 UI。
+#[allow(unused_imports)]
+use nwer::models;
+
 pub struct HelloWorld;
 
 impl Render for HelloWorld {
