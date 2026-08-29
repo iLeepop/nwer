@@ -1,4 +1,4 @@
-mod chapter_tree;
+pub(crate) mod chapter_tree;
 mod outline_tree;
 
 use gpui::*;
@@ -54,7 +54,9 @@ pub fn render_sidebar(
                 .rounded_md()
                 .bg(cx.theme().muted)
                 .child(match state.ui.sidebar_tab {
-                    SidebarTab::Chapters => chapter_tree::placeholder(cx).into_any_element(),
+                    SidebarTab::Chapters => {
+                        chapter_tree::render_chapter_tree(state, cx).into_any_element()
+                    }
                     SidebarTab::Outline => outline_tree::placeholder(cx).into_any_element(),
                 }),
         )
