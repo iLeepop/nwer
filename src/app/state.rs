@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
-use crate::models::{Chapter, Project};
+use crate::models::{Block, BlockFocus, BlockMultiSelect, BlockType, Chapter, Project};
+use crate::services::autosave::SaveAction;
+use crate::services::{
+    ChapterStats, DebounceTimer, SaveTrigger, action_for, count_chapter, update_book_total,
+};
 use crate::storage::{
     ChapterTreeNode, MoveDirection, RelPath, add_recent_project, copy_chapter, create_chapter_file,
     create_directory, create_project, delete_node, find_node_by_chapter_id, is_nonempty_directory,
@@ -70,12 +74,22 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub ui: WorkspaceUi,
     pub dirty: bool,
+    /// 最近一次保存失败的提示（保留 dirty）。
+    pub save_error: Option<String>,
     /// 扫描得到的章节树。
     pub chapter_tree: Vec<ChapterTreeNode>,
     /// 当前打开的章节内容。
     pub current_chapter: Option<Chapter>,
     /// 当前章节文件相对路径。
     pub current_chapter_path: Option<RelPath>,
+    /// 当前章在上次成功保存时的总字数（全书增量基线）。
+    pub chapter_word_count_baseline: u64,
+    /// 段落块焦点状态机。
+    pub block_focus: BlockFocus,
+    /// 多选相邻块（合并用）；与单选焦点并存。
+    pub block_multi_select: Option<BlockMultiSelect>,
+    /// 文本防抖计时（UI 用单调毫秒驱动）。
+    pub debounce: DebounceTimer,
 }
 
 impl AppState {
@@ -96,9 +110,14 @@ impl AppState {
             config_path,
             ui: WorkspaceUi::default(),
             dirty: false,
+            save_error: None,
             chapter_tree: Vec::new(),
             current_chapter: None,
             current_chapter_path: None,
+            chapter_word_count_baseline: 0,
+            block_focus: BlockFocus::Idle,
+            block_multi_select: None,
+            debounce: DebounceTimer::with_default_delay(),
         })
     }
 
@@ -116,6 +135,7 @@ impl AppState {
 
     /// 在 projects_root 下新建项目并记入最近列表。
     pub fn new_project(&mut self, title: impl Into<String>, now: DateTime<Utc>) -> Result<()> {
+        self.flush_save(SaveTrigger::BeforeLeave, now)?;
         let title = title.into();
         let root = self.expanded_projects_root()?;
         let (project_dir, project) = create_project(&root, &title, now)?;
@@ -125,6 +145,7 @@ impl AppState {
 
     /// 打开已有项目目录并记入最近列表。
     pub fn open_project(&mut self, path: impl AsRef<Path>, now: DateTime<Utc>) -> Result<()> {
+        self.flush_save(SaveTrigger::BeforeLeave, now)?;
         let project_dir = path.as_ref().to_path_buf();
         let project = load_project(&project_dir)
             .with_context(|| format!("failed to open project {}", project_dir.display()))?;
@@ -186,15 +207,26 @@ impl AppState {
 
     /// 选中并加载章节到中心编辑区。
     pub fn select_chapter(&mut self, rel_path: &str, now: DateTime<Utc>) -> Result<()> {
+        // 切换前同步保存当前章
+        if self.current_chapter_path.as_deref() != Some(rel_path) {
+            self.flush_save(SaveTrigger::BeforeLeave, now)?;
+        }
+
         let project_dir = self.project_dir.as_ref().context("no project open")?;
         let path = resolve_rel(project_dir, rel_path)?;
         let chapter = load_chapter(&path)?;
         let chapter_id = chapter.id;
+        let baseline = self.chapter_stats_for(&chapter).total_words();
 
         self.current_chapter = Some(chapter);
         self.current_chapter_path = Some(rel_path.to_string());
         self.ui.selected_node = Some(rel_path.to_string());
         self.dirty = false;
+        self.save_error = None;
+        self.chapter_word_count_baseline = baseline;
+        self.block_focus = BlockFocus::Idle;
+        self.block_multi_select = None;
+        self.debounce.cancel();
 
         if let Some(project) = self.project.as_mut() {
             project.last_opened_chapter = Some(chapter_id);
@@ -361,18 +393,258 @@ impl AppState {
     /// 更新当前章节标题并写盘。
     pub fn set_current_chapter_title(&mut self, title: impl Into<String>) -> Result<()> {
         let title = title.into();
-        let project_dir = self.project_dir.as_ref().context("no project open")?;
-        let rel = self
-            .current_chapter_path
-            .as_ref()
-            .context("no chapter open")?;
         let chapter = self.current_chapter.as_mut().context("no chapter open")?;
         chapter.title = title;
-        let path = resolve_rel(project_dir, rel)?;
-        save_chapter(&path, chapter)?;
+        self.dirty = true;
+        self.save_now()?;
         self.refresh_chapter_tree()?;
-        self.dirty = false;
         Ok(())
+    }
+
+    /// 当前章实时统计（尊重项目排除类型）。
+    pub fn current_chapter_stats(&self) -> ChapterStats {
+        match self.current_chapter.as_ref() {
+            Some(ch) => self.chapter_stats_for(ch),
+            None => ChapterStats::default(),
+        }
+    }
+
+    fn chapter_stats_for(&self, chapter: &Chapter) -> ChapterStats {
+        let exclude = self
+            .project
+            .as_ref()
+            .map(|p| p.settings.word_count_exclude_types.as_slice())
+            .unwrap_or(&[BlockType::Note, BlockType::SceneBreak]);
+        count_chapter(chapter, exclude)
+    }
+
+    /// 全书总字数（含未保存的本章增量预览）。
+    pub fn displayed_book_total(&self) -> u64 {
+        let book = self
+            .project
+            .as_ref()
+            .map(|p| p.total_word_count)
+            .unwrap_or(0);
+        let current = self.current_chapter_stats().total_words();
+        update_book_total(book, self.chapter_word_count_baseline, current)
+    }
+
+    /// 文本编辑：标记 dirty 并按防抖策略处理。
+    pub fn on_text_edit(&mut self, now_ms: u64) {
+        self.dirty = true;
+        if matches!(
+            action_for(SaveTrigger::TextEdit),
+            SaveAction::ScheduleDebounce
+        ) {
+            self.debounce.schedule_from(now_ms);
+        }
+    }
+
+    /// UI 时钟滴答：若防抖到期则保存。
+    pub fn tick_autosave(&mut self, now_ms: u64, _now: DateTime<Utc>) -> Result<bool> {
+        if self.debounce.take_if_due(now_ms) {
+            if self.dirty {
+                self.save_now()?;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// 菜单 / Cmd+S：立即保存。
+    pub fn save_manual(&mut self, now: DateTime<Utc>) -> Result<()> {
+        self.flush_save(SaveTrigger::Manual, now)
+    }
+
+    /// 退出前保存。
+    pub fn save_before_quit(&mut self, now: DateTime<Utc>) -> Result<()> {
+        self.flush_save(SaveTrigger::BeforeLeave, now)
+    }
+
+    fn flush_save(&mut self, trigger: SaveTrigger, _now: DateTime<Utc>) -> Result<()> {
+        match action_for(trigger) {
+            SaveAction::ScheduleDebounce => Ok(()),
+            SaveAction::SaveNow => {
+                self.debounce.take_pending();
+                if self.current_chapter.is_none() {
+                    return Ok(());
+                }
+                // 手动保存始终尝试；其余仅在 dirty 时写盘
+                if !self.dirty && trigger != SaveTrigger::Manual {
+                    return Ok(());
+                }
+                self.save_now()
+            }
+        }
+    }
+
+    /// 立即将当前章节与全书字数写盘。失败时保留 dirty 并记录错误。
+    pub fn save_now(&mut self) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let project_dir = self
+                .project_dir
+                .as_ref()
+                .context("no project open")?
+                .clone();
+            let rel = self
+                .current_chapter_path
+                .as_ref()
+                .context("no chapter open")?
+                .clone();
+            let chapter = self.current_chapter.as_ref().context("no chapter open")?;
+            let new_count = self.chapter_stats_for(chapter).total_words();
+            let path = resolve_rel(&project_dir, &rel)?;
+            save_chapter(&path, chapter)?;
+
+            if let Some(project) = self.project.as_mut() {
+                project.total_word_count = update_book_total(
+                    project.total_word_count,
+                    self.chapter_word_count_baseline,
+                    new_count,
+                );
+                project.updated_at = Utc::now();
+            }
+            self.chapter_word_count_baseline = new_count;
+            self.persist_project()?;
+            self.dirty = false;
+            self.save_error = None;
+            Ok(())
+        })();
+
+        if let Err(ref err) = result {
+            self.save_error = Some(format!("{err:#}"));
+            // 保留 dirty
+        }
+        result
+    }
+
+    // —— 块操作（结构性变更 → 立即保存）——
+
+    pub fn insert_block_at(
+        &mut self,
+        index: usize,
+        block_type: BlockType,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.insert_block(index, Block::new(block_type, String::new(), now))?;
+        self.dirty = true;
+        self.block_focus = BlockFocus::Selected { index };
+        self.block_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn delete_block_at(&mut self, index: usize, now: DateTime<Utc>) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.remove_block(index)?;
+        self.dirty = true;
+        self.block_focus = self.block_focus.clone().clamp_to_len(chapter.blocks.len());
+        self.block_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn set_block_type_at(
+        &mut self,
+        index: usize,
+        block_type: BlockType,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.set_block_type(index, block_type, now)?;
+        self.dirty = true;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn set_block_speaker_at(
+        &mut self,
+        index: usize,
+        speaker: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.set_speaker(index, speaker, now)?;
+        self.dirty = true;
+        self.on_text_edit(0); // 防抖：speaker 视为文本
+        Ok(())
+    }
+
+    pub fn set_block_content_at(
+        &mut self,
+        index: usize,
+        content: String,
+        now: DateTime<Utc>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.set_block_content(index, content, now)?;
+        self.on_text_edit(now_ms);
+        Ok(())
+    }
+
+    pub fn split_block_at_cursor(
+        &mut self,
+        index: usize,
+        byte_offset: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.split_block_at(index, byte_offset, now)?;
+        self.dirty = true;
+        self.block_focus = BlockFocus::Editing { index: index + 1 };
+        self.block_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn merge_selected_blocks(&mut self, now: DateTime<Utc>) -> Result<()> {
+        let range = self
+            .block_multi_select
+            .clone()
+            .context("no multi-selection for merge")?;
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.merge_blocks(range.start, range.end, now)?;
+        self.dirty = true;
+        self.block_focus = BlockFocus::Selected { index: range.start };
+        self.block_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn swap_block_at(&mut self, index: usize, up: bool, now: DateTime<Utc>) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.swap_block(index, up)?;
+        let new_index = if up { index - 1 } else { index + 1 };
+        self.dirty = true;
+        self.block_focus = BlockFocus::Selected { index: new_index };
+        self.block_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn click_block(&mut self, index: usize) {
+        self.block_focus = self.block_focus.clone().click_block(index);
+        self.block_multi_select = None;
+    }
+
+    pub fn click_editor_outside(&mut self) {
+        self.block_focus = self.block_focus.clone().click_outside();
+        self.block_multi_select = None;
+    }
+
+    pub fn escape_block_focus(&mut self) {
+        self.block_focus = self.block_focus.clone().escape();
+    }
+
+    pub fn move_block_focus(&mut self, delta: isize) {
+        let count = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.blocks.len())
+            .unwrap_or(0);
+        self.block_focus = self.block_focus.clone().move_selection(delta, count);
+        self.block_multi_select = None;
+    }
+
+    pub fn set_multi_select(&mut self, a: usize, b: usize) {
+        self.block_multi_select = Some(BlockMultiSelect::new(a, b));
+        self.block_focus = BlockFocus::Selected { index: a.min(b) };
     }
 
     fn set_current_project(
@@ -387,6 +659,11 @@ impl AppState {
         self.ui.selected_node = None;
         self.current_chapter = None;
         self.current_chapter_path = None;
+        self.chapter_word_count_baseline = 0;
+        self.block_focus = BlockFocus::Idle;
+        self.block_multi_select = None;
+        self.debounce.cancel();
+        self.save_error = None;
 
         let path_str = project_dir.to_string_lossy().into_owned();
         add_recent_project(&mut self.config, path_str, project.title.clone(), now);
@@ -490,6 +767,9 @@ impl AppState {
         {
             self.current_chapter = None;
             self.current_chapter_path = None;
+            self.chapter_word_count_baseline = 0;
+            self.block_focus = BlockFocus::Idle;
+            self.block_multi_select = None;
             if let Some(project) = self.project.as_mut() {
                 project.last_opened_chapter = None;
             }
@@ -696,5 +976,66 @@ mod tests {
         let path = resolve_rel(state.project_dir.as_ref().unwrap(), "ch-001.json").unwrap();
         let loaded = load_chapter(&path).unwrap();
         assert_eq!(loaded.title, "新标题");
+    }
+
+    #[test]
+    fn block_ops_save_immediately_and_update_word_count() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("块编辑", now()).unwrap();
+        state
+            .create_chapter_under("", "ch-001", "一", now())
+            .unwrap();
+
+        state
+            .set_block_content_at(0, "汉字测试。".into(), now(), 0)
+            .unwrap();
+        assert!(state.dirty);
+        assert!(state.debounce.is_pending());
+
+        // 防抖到期
+        state.tick_autosave(500, now()).unwrap();
+        assert!(!state.dirty);
+        assert_eq!(state.current_chapter_stats().chars.han, 4);
+        assert_eq!(state.current_chapter_stats().chars.punct_space, 1);
+        assert_eq!(state.project.as_ref().unwrap().total_word_count, 5);
+
+        // 结构性：插入立即保存
+        state
+            .insert_block_at(1, BlockType::Dialogue, now())
+            .unwrap();
+        assert!(!state.dirty);
+        assert_eq!(state.current_chapter.as_ref().unwrap().blocks.len(), 2);
+
+        state
+            .set_block_content_at(1, "对话内容".into(), now(), 1000)
+            .unwrap();
+        state.save_manual(now()).unwrap();
+        assert_eq!(state.project.as_ref().unwrap().total_word_count, 9);
+
+        state.split_block_at_cursor(0, "汉字".len(), now()).unwrap();
+        assert_eq!(state.current_chapter.as_ref().unwrap().blocks.len(), 3);
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn switching_chapter_flushes_dirty() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("切换", now()).unwrap();
+        state
+            .create_chapter_under("", "ch-001", "一", now())
+            .unwrap();
+        state
+            .create_chapter_under("", "ch-002", "二", now())
+            .unwrap();
+        state.select_chapter("ch-001.json", now()).unwrap();
+        state
+            .set_block_content_at(0, "甲乙".into(), now(), 0)
+            .unwrap();
+        assert!(state.dirty);
+        state.select_chapter("ch-002.json", now()).unwrap();
+        assert!(!state.dirty);
+        let path = resolve_rel(state.project_dir.as_ref().unwrap(), "ch-001.json").unwrap();
+        let loaded = load_chapter(&path).unwrap();
+        assert_eq!(loaded.blocks[0].content, "甲乙");
     }
 }

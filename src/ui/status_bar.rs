@@ -1,14 +1,13 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{ActiveTheme as _, h_flex};
 
 use crate::app::AppState;
 
 pub fn render_status_bar(state: &AppState, cx: &App) -> impl IntoElement {
-    let book_total = state
-        .project
-        .as_ref()
-        .map(|p| p.total_word_count)
-        .unwrap_or(0);
+    let stats = state.current_chapter_stats();
+    let book_total = state.displayed_book_total();
+    let err = state.save_error.clone();
 
     h_flex()
         .id("status-bar")
@@ -21,12 +20,27 @@ pub fn render_status_bar(state: &AppState, cx: &App) -> impl IntoElement {
         .border_color(cx.theme().border)
         .bg(cx.theme().muted)
         .text_sm()
-        .child(stat("本章总字数", 0, cx))
-        .child(stat("汉字", 0, cx))
-        .child(stat("标点空格", 0, cx))
-        .child(stat("块数", 0, cx))
-        .child(stat("对话数", 0, cx))
+        .child(stat("本章总字数", stats.total_words(), cx))
+        .child(stat("汉字", stats.chars.han, cx))
+        .child(stat("标点空格", stats.chars.punct_space, cx))
+        .child(stat("块数", stats.block_count, cx))
+        .child(stat("对话数", stats.dialogue_count, cx))
         .child(stat("全书总字数", book_total, cx))
+        .when(state.dirty, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().warning)
+                    .child("未保存"),
+            )
+        })
+        .children(err.map(|e| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().danger)
+                .child(format!("保存失败: {e}"))
+                .into_any_element()
+        }))
 }
 
 fn stat(label: &str, value: u64, cx: &App) -> impl IntoElement {

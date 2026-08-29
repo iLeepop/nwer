@@ -188,12 +188,16 @@ fn render_node(
                     )
                     .on_click(cx.listener({
                         let rel = rel.clone();
-                        move |this, _, _, cx| {
+                        move |this, _, window, cx| {
                             if is_dir {
                                 let _ = this.state.toggle_expanded(&rel);
                                 this.state.select_directory(&rel);
                             } else if let Err(err) = this.state.select_chapter(&rel, Utc::now()) {
                                 eprintln!("select chapter failed: {err:#}");
+                            } else {
+                                this.invalidate_editor_inputs();
+                                this.title_input = None;
+                                this.ensure_title_input(window, cx);
                             }
                             cx.notify();
                         }

@@ -69,6 +69,15 @@ pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl
         )
         .child(div().flex_1())
         .child(
+            Button::new("save-doc")
+                .small()
+                .label("保存")
+                .disabled(state.current_chapter.is_none())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.save_document(cx);
+                })),
+        )
+        .child(
             h_flex()
                 .gap_1()
                 .child(menu_placeholder("文件"))

@@ -20,7 +20,7 @@ fn main() {
                         .join("config.json");
                     AppState::load_from(fallback).expect("fallback AppState")
                 });
-                let view = cx.new(|_| Workspace::new(state));
+                let view = cx.new(|cx| Workspace::new(state, cx));
                 cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
             })
             .expect("Failed to open window");
