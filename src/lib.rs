@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod app;
 pub mod models;
 pub mod services;
