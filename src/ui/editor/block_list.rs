@@ -137,6 +137,7 @@ pub fn render_block_list(
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
                         if event.modifiers.shift {
                             if let Some(anchor) = this.state.block_focus.selected_index() {
                                 this.state.set_multi_select(anchor, index);
@@ -218,10 +219,9 @@ pub fn render_block_list(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, _, cx| {
-                // 点击列表空白处结束编辑（块自身会 stop? 这里作为兜底）
-                // 不在此处理，以免抢走块点击；由 Esc / 显式按钮处理
-                let _ = this;
-                let _ = cx;
+                this.state.click_editor_outside();
+                this.invalidate_editor_inputs();
+                cx.notify();
             }),
         )
         .children(children)

@@ -1018,6 +1018,17 @@ mod tests {
     }
 
     #[test]
+    fn click_editor_outside_clears_focus_and_multi_select() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("块外点击", now()).unwrap();
+        state.block_focus = BlockFocus::Editing { index: 0 };
+        state.set_multi_select(0, 1);
+        state.click_editor_outside();
+        assert_eq!(state.block_focus, BlockFocus::Idle);
+        assert!(state.block_multi_select.is_none());
+    }
+
+    #[test]
     fn switching_chapter_flushes_dirty() {
         let (_dir, mut state) = state_with_temp_root();
         state.new_project("切换", now()).unwrap();
