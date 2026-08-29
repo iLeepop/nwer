@@ -9,7 +9,7 @@ use gpui_component::{
 };
 
 use crate::app::AppState;
-use crate::models::{BlockFocus, BlockType};
+use crate::models::{BlockFocus, BlockType, OutlineCategory};
 use crate::storage::{ChapterNodeKind, MoveDirection, find_node_by_rel};
 use crate::ui::editor::{
     DeleteFocusedBlock, EscapeBlockFocus, FocusNextBlock, FocusPrevBlock, MergeSelectedBlocks,
@@ -19,15 +19,22 @@ use crate::ui::editor::{
 use crate::ui::sidebar::chapter_tree::{
     CopyChapter, DeleteNode, MoveDown, MoveUp, NewChapter, NewDirectory, RenameNode,
 };
+use crate::ui::sidebar::outline_tree::{DeleteOutlineEntry, NewOutlineEntry, RenameOutlineEntry};
 use crate::ui::{ai_panel, editor, sidebar, status_bar, top_bar};
+use std::collections::HashMap;
 
 pub struct Workspace {
     pub(crate) state: AppState,
     pub(crate) title_input: Option<Entity<InputState>>,
     pub(crate) editing_input: Option<(usize, Entity<TextareaState>)>,
     pub(crate) speaker_input: Option<(usize, Entity<InputState>)>,
+    pub(crate) search_input: Option<Entity<InputState>>,
+    pub(crate) outline_field_name_inputs: HashMap<String, Entity<InputState>>,
+    pub(crate) outline_field_value_inputs: HashMap<String, Entity<TextareaState>>,
     _edit_subscriptions: Vec<Subscription>,
     _title_subscription: Option<Subscription>,
+    _search_subscription: Option<Subscription>,
+    _outline_subscriptions: Vec<Subscription>,
     debounce_gen: u64,
     _debounce_task: Option<Task<()>>,
     focus_handle: FocusHandle,
@@ -41,8 +48,13 @@ impl Workspace {
             title_input: None,
             editing_input: None,
             speaker_input: None,
+            search_input: None,
+            outline_field_name_inputs: HashMap::new(),
+            outline_field_value_inputs: HashMap::new(),
             _edit_subscriptions: Vec::new(),
             _title_subscription: None,
+            _search_subscription: None,
+            _outline_subscriptions: Vec::new(),
             debounce_gen: 0,
             _debounce_task: None,
             focus_handle: cx.focus_handle(),
@@ -66,26 +78,483 @@ impl Workspace {
         ]);
     }
 
-    pub(crate) fn create_sample_project(&mut self) -> anyhow::Result<()> {
-        let stamp = Utc::now().format("%Y%m%d-%H%M%S");
-        let title = format!("示例项目-{stamp}");
-        self.state.new_project(title, Utc::now())?;
-        self.title_input = None;
-        self.invalidate_editor_inputs();
-        Ok(())
-    }
-
-    pub(crate) fn open_most_recent(&mut self) -> anyhow::Result<()> {
-        self.state.open_most_recent(Utc::now())?;
-        self.title_input = None;
-        self.invalidate_editor_inputs();
-        Ok(())
-    }
-
     pub(crate) fn invalidate_editor_inputs(&mut self) {
         self.editing_input = None;
         self.speaker_input = None;
         self._edit_subscriptions.clear();
+    }
+
+    pub(crate) fn invalidate_outline_inputs(&mut self) {
+        self.outline_field_name_inputs.clear();
+        self.outline_field_value_inputs.clear();
+        self._outline_subscriptions.clear();
+    }
+
+    pub(crate) fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input.is_some() {
+            return;
+        }
+        let query = self.state.search_query.clone();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("搜索……")
+                .default_value(query)
+        });
+        let workspace = cx.entity();
+        self._search_subscription = Some(cx.subscribe_in(&input, window, {
+            move |_this, state, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = state.read(cx).value().to_string();
+                    workspace.update(cx, |this, cx| {
+                        if let Err(err) = this.state.set_search_query(text) {
+                            eprintln!("search failed: {err:#}");
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+        self.search_input = Some(input);
+    }
+
+    pub(crate) fn ensure_outline_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.state.current_outline.clone() else {
+            self.invalidate_outline_inputs();
+            return;
+        };
+        let keys: Vec<String> = entry.fields.keys().cloned().collect();
+        // 移除已删除字段的输入
+        self.outline_field_name_inputs
+            .retain(|k, _| keys.contains(k));
+        self.outline_field_value_inputs
+            .retain(|k, _| keys.contains(k));
+
+        for key in keys {
+            if self.outline_field_name_inputs.contains_key(&key) {
+                continue;
+            }
+            let value = entry.fields.get(&key).cloned().unwrap_or_default();
+            let name_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("字段名")
+                    .default_value(key.clone())
+            });
+            let value_input = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(1, 8)
+                    .placeholder("字段值")
+                    .default_value(value)
+            });
+
+            let workspace = cx.entity();
+            let field_key = key.clone();
+            self._outline_subscriptions
+                .push(cx.subscribe_in(&name_input, window, {
+                    let workspace = workspace.clone();
+                    let old_key = field_key.clone();
+                    move |_this, state, event, window, cx| {
+                        if matches!(event, InputEvent::Blur) {
+                            let new_key = state.read(cx).value().to_string();
+                            let new_key = new_key.trim().to_string();
+                            if new_key.is_empty() || new_key == old_key {
+                                return;
+                            }
+                            workspace.update(cx, |this, cx| {
+                                if let Err(err) =
+                                    this.state
+                                        .rename_outline_field(&old_key, &new_key, Utc::now())
+                                {
+                                    eprintln!("rename field failed: {err:#}");
+                                    // 恢复显示
+                                    if let Some(input) =
+                                        this.outline_field_name_inputs.get(&old_key)
+                                    {
+                                        input.update(cx, |s, cx| {
+                                            s.set_value(old_key.clone(), window, cx);
+                                        });
+                                    }
+                                } else {
+                                    this.invalidate_outline_inputs();
+                                    this.ensure_outline_form(window, cx);
+                                }
+                                cx.notify();
+                            });
+                        }
+                    }
+                }));
+
+            let workspace = cx.entity();
+            let field_key = key.clone();
+            self._outline_subscriptions
+                .push(cx.subscribe_in(&value_input, window, {
+                    let workspace = workspace.clone();
+                    move |_this, state, event, _, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let text = state.read(cx).value().to_string();
+                            workspace.update(cx, |this, cx| {
+                                let _ = this.state.set_outline_field(
+                                    &field_key,
+                                    text,
+                                    Utc::now(),
+                                    monotonic_ms(),
+                                );
+                                this.schedule_debounced_save(cx);
+                                cx.notify();
+                            });
+                        }
+                    }
+                }));
+
+            self.outline_field_name_inputs
+                .insert(key.clone(), name_input);
+            self.outline_field_value_inputs.insert(key, value_input);
+        }
+    }
+
+    pub(crate) fn prompt_new_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.project_dir.is_none() {
+            return;
+        }
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("条目名称")
+                .default_value("未命名")
+        });
+        // 分类用循环选择：默认角色；在对话框中用按钮切换较复杂，简化为输入分类名
+        let category_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("分类：角色/背景/场景/事件/杂项")
+                .default_value("角色")
+        });
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let name_input = name_input.clone();
+            let category_input = category_input.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title("新建大纲条目")
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Input::new(&name_input))
+                        .child(Input::new(&category_input)),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("创建")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, window, cx| {
+                            let name = name_input.read(cx).value().to_string();
+                            let cat = category_input.read(cx).value().to_string();
+                            let category = parse_outline_category(cat.trim());
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                this.state
+                                    .create_outline(name.trim(), category, Utc::now())?;
+                                this.invalidate_editor_inputs();
+                                this.title_input = None;
+                                this.invalidate_outline_inputs();
+                                this.ensure_outline_form(window, cx);
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("create outline failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
+    pub(crate) fn prompt_rename_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.state.current_outline.clone() else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("新名称")
+                .default_value(entry.key.clone())
+        });
+        let workspace = cx.entity();
+        let id = entry.id;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title("重命名大纲条目")
+                .child(Input::new(&input))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确定")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, window, cx| {
+                            let name = input.read(cx).value().to_string();
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                this.state.rename_outline(id, name.trim(), Utc::now())?;
+                                this.invalidate_outline_inputs();
+                                this.ensure_outline_form(window, cx);
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("rename outline failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
+    pub(crate) fn confirm_delete_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.state.current_outline.clone() else {
+            return;
+        };
+        let workspace = cx.entity();
+        let id = entry.id;
+        let key = entry.key.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let workspace = workspace.clone();
+            alert
+                .title("确认删除大纲条目")
+                .description(format!("确定删除「{key}」？"))
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    if let Err(err) = workspace.update(cx, |this, cx| {
+                        this.state.delete_outline(id, Utc::now())?;
+                        this.invalidate_outline_inputs();
+                        cx.notify();
+                        anyhow::Ok(())
+                    }) {
+                        eprintln!("delete outline failed: {err:#}");
+                    }
+                    true
+                })
+        });
+    }
+
+    pub(crate) fn prompt_add_outline_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.current_outline.is_none() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("字段名")
+                .default_value("新字段")
+        });
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title("添加字段")
+                .child(Input::new(&input))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("添加")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, window, cx| {
+                            let name = input.read(cx).value().to_string();
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                this.state.add_outline_field(name.trim(), Utc::now())?;
+                                this.invalidate_outline_inputs();
+                                this.ensure_outline_form(window, cx);
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("add field failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
+    pub(crate) fn prompt_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("项目名称")
+                .default_value(format!("新项目-{}", Utc::now().format("%Y%m%d-%H%M%S")))
+        });
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title("新建项目")
+                .child(Input::new(&input))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("创建")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, _, cx| {
+                            let title = input.read(cx).value().to_string();
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                this.state.new_project(title.trim(), Utc::now())?;
+                                this.title_input = None;
+                                this.invalidate_editor_inputs();
+                                this.invalidate_outline_inputs();
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("new project failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
+    pub(crate) fn prompt_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let recent_hint = self
+            .state
+            .config
+            .recent_projects
+            .iter()
+            .take(5)
+            .map(|r| format!("· {} — {}", r.title, r.path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let default = self
+            .state
+            .config
+            .recent_projects
+            .first()
+            .map(|r| r.path.clone())
+            .unwrap_or_else(|| {
+                self.state
+                    .expanded_projects_root()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("项目文件夹路径")
+                .default_value(default)
+        });
+        let workspace = cx.entity();
+        let description = if recent_hint.is_empty() {
+            "输入项目文件夹绝对路径（第一版无原生文件夹选择器）".to_string()
+        } else {
+            format!("最近项目：\n{recent_hint}\n\n或输入路径：")
+        };
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input.clone();
+            let workspace = workspace.clone();
+            let description = description.clone();
+            dialog
+                .title("打开项目")
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_sm().child(description))
+                        .child(Input::new(&input)),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("打开")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, _, cx| {
+                            let path = input.read(cx).value().to_string();
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                let expanded = crate::app::expand_user_path(path.trim())?;
+                                this.state.open_project(expanded, Utc::now())?;
+                                this.title_input = None;
+                                this.invalidate_editor_inputs();
+                                this.invalidate_outline_inputs();
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("open project failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
+    pub(crate) fn prompt_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.state.config.projects_root.clone();
+        let depth = self.state.max_depth().to_string();
+        let root_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("项目根目录")
+                .default_value(root)
+        });
+        let depth_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("当前项目 max_depth")
+                .default_value(depth)
+        });
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let root_input = root_input.clone();
+            let depth_input = depth_input.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title("设置")
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_sm().child("项目根目录 (projects_root)"))
+                        .child(Input::new(&root_input))
+                        .child(div().text_sm().child("当前项目最大层级 (max_depth)"))
+                        .child(Input::new(&depth_input)),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("保存")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, _, cx| {
+                            let root = root_input.read(cx).value().to_string();
+                            let depth = depth_input.read(cx).value().to_string();
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                this.state.set_projects_root(root.trim())?;
+                                if this.state.project.is_some() {
+                                    let d: u32 = depth.trim().parse().unwrap_or(3);
+                                    this.state.set_max_depth(d, Utc::now())?;
+                                }
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("settings failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
+    pub(crate) fn open_recent_at(&mut self, index: usize) -> anyhow::Result<()> {
+        let recent = self
+            .state
+            .config
+            .recent_projects
+            .get(index)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("recent index out of range"))?;
+        let path = crate::app::expand_user_path(&recent.path)?;
+        self.state.open_project(path, Utc::now())?;
+        self.title_input = None;
+        self.invalidate_editor_inputs();
+        self.invalidate_outline_inputs();
+        Ok(())
+    }
+
+    pub(crate) fn quit_app(&mut self, cx: &mut Context<Self>) {
+        if let Err(err) = self.state.save_before_quit(Utc::now()) {
+            eprintln!("save before quit failed: {err:#}");
+        }
+        cx.quit();
     }
 
     pub(crate) fn save_document(&mut self, cx: &mut Context<Self>) {
@@ -583,6 +1052,16 @@ fn monotonic_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn parse_outline_category(label: &str) -> OutlineCategory {
+    match label {
+        "背景" => OutlineCategory::Background,
+        "场景" => OutlineCategory::Scene,
+        "事件" => OutlineCategory::Event,
+        "杂项" => OutlineCategory::Misc,
+        _ => OutlineCategory::Character,
+    }
+}
+
 impl Focusable for Workspace {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -717,6 +1196,41 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SetTypeNote, _, cx| {
                 this.set_focused_block_type(BlockType::Note, cx);
             }))
+            .on_action(cx.listener(|this, _: &NewOutlineEntry, window, cx| {
+                this.prompt_new_outline(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RenameOutlineEntry, window, cx| {
+                this.prompt_rename_outline(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteOutlineEntry, window, cx| {
+                this.confirm_delete_outline(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &top_bar::NewProject, window, cx| {
+                this.prompt_new_project(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &top_bar::OpenProject, window, cx| {
+                this.prompt_open_project(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &top_bar::QuitApp, _, cx| {
+                this.quit_app(cx);
+            }))
+            .on_action(cx.listener(|this, _: &top_bar::ToggleSidebar, _, cx| {
+                this.state.toggle_sidebar();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &top_bar::ToggleAiPanel, _, cx| {
+                this.state.toggle_ai_panel();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &top_bar::OpenSettings, window, cx| {
+                this.prompt_settings(window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &top_bar::OpenRecentAt, _, cx| {
+                if let Err(err) = this.open_recent_at(action.0) {
+                    eprintln!("open recent failed: {err:#}");
+                }
+                cx.notify();
+            }))
             .child(top_bar::render_top_bar(&self.state, cx))
             .child(
                 div()
@@ -731,54 +1245,56 @@ impl Render for Workspace {
                                     .visible(self.state.ui.sidebar_visible)
                                     .size(px(240.))
                                     .size_range(px(180.)..px(360.))
-                                    .child(sidebar::render_sidebar(&self.state, cx)),
+                                    .child(sidebar::render_sidebar(self, window, cx)),
                             )
-                            .child(
-                                resizable_panel().child(
-                                    v_flex()
-                                        .id("editor-pane")
-                                        .size_full()
-                                        .p_4()
-                                        .gap_3()
-                                        .child(if let Some(input) = self.title_input.as_ref() {
-                                            div()
-                                                .w_full()
-                                                .child(Input::new(input).into_any_element())
-                                                .into_any_element()
-                                        } else {
-                                            div()
-                                                .text_lg()
-                                                .font_bold()
-                                                .child(chapter_title)
-                                                .into_any_element()
-                                        })
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .child(
-                                                    Button::new("save-now")
-                                                        .small()
-                                                        .label("保存")
-                                                        .disabled(
-                                                            self.state.current_chapter.is_none(),
-                                                        )
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.save_document(cx);
-                                                        })),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(
-                                                            // CONCERNS: 块排序使用上移/下移按钮代替拖拽
-                                                            "提示：块排序请用上移/下移；Cmd/Ctrl+S 保存",
-                                                        ),
-                                                ),
-                                        )
-                                        .child(editor::render_block_list(self, window, cx)),
-                                ),
-                            )
+                            .child(resizable_panel().child(if self.state.current_outline.is_some() {
+                                editor::render_outline_form(self, window, cx).into_any_element()
+                            } else {
+                                v_flex()
+                                    .id("editor-pane")
+                                    .size_full()
+                                    .p_4()
+                                    .gap_3()
+                                    .child(if let Some(input) = self.title_input.as_ref() {
+                                        div()
+                                            .w_full()
+                                            .child(Input::new(input).into_any_element())
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .text_lg()
+                                            .font_bold()
+                                            .child(chapter_title)
+                                            .into_any_element()
+                                    })
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("save-now")
+                                                    .small()
+                                                    .label("保存")
+                                                    .disabled(
+                                                        self.state.current_chapter.is_none()
+                                                            && self.state.current_outline.is_none(),
+                                                    )
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.save_document(cx);
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        // CONCERNS: 块排序使用上移/下移按钮代替拖拽
+                                                        "提示：块排序请用上移/下移；Cmd/Ctrl+S 保存",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(editor::render_block_list(self, window, cx))
+                                    .into_any_element()
+                            }))
                             .child(
                                 resizable_panel()
                                     .visible(self.state.ui.ai_panel_open)

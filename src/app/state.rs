@@ -4,17 +4,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
-use crate::models::{Block, BlockFocus, BlockMultiSelect, BlockType, Chapter, Project};
+use crate::models::{
+    Block, BlockFocus, BlockMultiSelect, BlockType, Chapter, OutlineCategory, OutlineEntry, Project,
+};
 use crate::services::autosave::SaveAction;
 use crate::services::{
-    ChapterStats, DebounceTimer, SaveTrigger, action_for, count_chapter, update_book_total,
+    ChapterStats, DebounceTimer, FullTextHit, SaveTrigger, SearchMode, action_for, count_chapter,
+    filter_chapter_tree_by_name, filter_outline_by_name, search_full_text, update_book_total,
 };
 use crate::storage::{
     ChapterTreeNode, MoveDirection, RelPath, add_recent_project, copy_chapter, create_chapter_file,
-    create_directory, create_project, delete_node, find_node_by_chapter_id, is_nonempty_directory,
-    load_chapter, load_config_from, load_project, move_node, move_sibling, rename_node,
-    resolve_rel, save_chapter, save_config_to, save_project, scan_chapter_tree,
+    create_directory, create_outline_entry, create_project, delete_node, delete_outline_entry,
+    find_node_by_chapter_id, is_nonempty_directory, list_outline_entries, load_chapter,
+    load_config_from, load_project, move_node, move_sibling, outline_entry_path, rename_node,
+    rename_outline_entry, resolve_rel, save_chapter, save_config_to, save_outline_entry,
+    save_project, scan_chapter_tree,
 };
+use uuid::Uuid;
 
 /// 左侧栏当前 Tab。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,6 +96,16 @@ pub struct AppState {
     pub block_multi_select: Option<BlockMultiSelect>,
     /// 文本防抖计时（UI 用单调毫秒驱动）。
     pub debounce: DebounceTimer,
+    /// 当前项目大纲条目缓存。
+    pub outline_entries: Vec<OutlineEntry>,
+    /// 中心区正在编辑的大纲条目。
+    pub current_outline: Option<OutlineEntry>,
+    /// 搜索框查询。
+    pub search_query: String,
+    /// 搜索模式。
+    pub search_mode: SearchMode,
+    /// 全文搜索结果。
+    pub full_text_hits: Vec<FullTextHit>,
 }
 
 impl AppState {
@@ -118,6 +134,11 @@ impl AppState {
             block_focus: BlockFocus::Idle,
             block_multi_select: None,
             debounce: DebounceTimer::with_default_delay(),
+            outline_entries: Vec::new(),
+            current_outline: None,
+            search_query: String::new(),
+            search_mode: SearchMode::default(),
+            full_text_hits: Vec::new(),
         })
     }
 
@@ -164,10 +185,31 @@ impl AppState {
 
     pub fn toggle_ai_panel(&mut self) {
         self.ui.ai_panel_open = !self.ui.ai_panel_open;
+        let _ = self.persist_ui_state();
+    }
+
+    pub fn toggle_sidebar(&mut self) {
+        self.ui.sidebar_visible = !self.ui.sidebar_visible;
     }
 
     pub fn set_sidebar_tab(&mut self, tab: SidebarTab) {
         self.ui.sidebar_tab = tab;
+        let _ = self.persist_ui_state();
+    }
+
+    /// 更新应用配置中的项目根目录并落盘。
+    pub fn set_projects_root(&mut self, root: impl Into<String>) -> Result<()> {
+        self.config.projects_root = root.into();
+        save_config_to(&self.config_path, &self.config)?;
+        Ok(())
+    }
+
+    /// 更新当前项目 max_depth 并落盘。
+    pub fn set_max_depth(&mut self, max_depth: u32, now: DateTime<Utc>) -> Result<()> {
+        let project = self.project.as_mut().context("no project open")?;
+        project.settings.max_depth = max_depth.max(1);
+        project.updated_at = now;
+        self.persist_project()
     }
 
     pub fn current_title(&self) -> &str {
@@ -184,6 +226,235 @@ impl AppState {
         };
         self.chapter_tree = scan_chapter_tree(project_dir)?;
         Ok(())
+    }
+
+    pub fn refresh_outline_entries(&mut self) -> Result<()> {
+        let Some(project_dir) = self.project_dir.as_ref() else {
+            self.outline_entries.clear();
+            return Ok(());
+        };
+        self.outline_entries = list_outline_entries(project_dir)?;
+        Ok(())
+    }
+
+    /// 名称过滤后的章节树（全文模式或空查询时返回原树）。
+    pub fn displayed_chapter_tree(&self) -> Vec<ChapterTreeNode> {
+        if self.search_mode != SearchMode::NameFilter || self.search_query.trim().is_empty() {
+            return self.chapter_tree.clone();
+        }
+        filter_chapter_tree_by_name(&self.chapter_tree, &self.search_query)
+    }
+
+    /// 名称过滤后的大纲列表。
+    pub fn displayed_outline_entries(&self) -> Vec<OutlineEntry> {
+        if self.search_mode != SearchMode::NameFilter || self.search_query.trim().is_empty() {
+            return self.outline_entries.clone();
+        }
+        filter_outline_by_name(&self.outline_entries, &self.search_query)
+    }
+
+    pub fn set_search_query(&mut self, query: impl Into<String>) -> Result<()> {
+        self.search_query = query.into();
+        self.refresh_search_results()
+    }
+
+    pub fn set_search_mode(&mut self, mode: SearchMode) -> Result<()> {
+        self.search_mode = mode;
+        self.refresh_search_results()
+    }
+
+    pub fn refresh_search_results(&mut self) -> Result<()> {
+        self.full_text_hits.clear();
+        if self.search_mode != SearchMode::FullText {
+            return Ok(());
+        }
+        let Some(project_dir) = self.project_dir.as_ref() else {
+            return Ok(());
+        };
+        self.full_text_hits = search_full_text(project_dir, &self.search_query)?;
+        Ok(())
+    }
+
+    /// 打开全文命中：加载章节并选中对应块。
+    pub fn open_full_text_hit(&mut self, index: usize, now: DateTime<Utc>) -> Result<()> {
+        let hit = self
+            .full_text_hits
+            .get(index)
+            .cloned()
+            .context("full-text hit index out of range")?;
+        self.select_chapter(&hit.chapter_rel, now)?;
+        self.current_outline = None;
+        self.ui.sidebar_tab = SidebarTab::Chapters;
+        // 按 block_id 定位；找不到则回退到记录的 index
+        let block_index = self
+            .current_chapter
+            .as_ref()
+            .and_then(|ch| ch.blocks.iter().position(|b| b.id == hit.block_id))
+            .unwrap_or(hit.block_index);
+        self.block_focus = BlockFocus::Selected { index: block_index };
+        self.block_multi_select = None;
+        Ok(())
+    }
+
+    pub fn select_outline(&mut self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        self.flush_save(SaveTrigger::BeforeLeave, now)?;
+        let entry = self
+            .outline_entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .context("outline entry not found")?;
+        self.current_outline = Some(entry);
+        self.current_chapter = None;
+        self.current_chapter_path = None;
+        self.chapter_word_count_baseline = 0;
+        self.block_focus = BlockFocus::Idle;
+        self.block_multi_select = None;
+        self.ui.selected_node = None;
+        self.dirty = false;
+        self.save_error = None;
+        self.debounce.cancel();
+        Ok(())
+    }
+
+    pub fn create_outline(
+        &mut self,
+        key: &str,
+        category: OutlineCategory,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid> {
+        let project_dir = self
+            .project_dir
+            .as_ref()
+            .context("no project open")?
+            .clone();
+        self.flush_save(SaveTrigger::BeforeLeave, now)?;
+        let entry = create_outline_entry(&project_dir, key, category, now)?;
+        let id = entry.id;
+        self.refresh_outline_entries()?;
+        self.current_outline = Some(entry);
+        self.dirty = false;
+        self.touch_project(now)?;
+        Ok(id)
+    }
+
+    pub fn delete_outline(&mut self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        let entry = self
+            .outline_entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .context("outline entry not found")?;
+        let project_dir = self
+            .project_dir
+            .as_ref()
+            .context("no project open")?
+            .clone();
+        delete_outline_entry(&project_dir, entry.category, &entry.key)?;
+        if self.current_outline.as_ref().map(|e| e.id) == Some(id) {
+            self.current_outline = None;
+            self.dirty = false;
+            self.debounce.cancel();
+        }
+        self.refresh_outline_entries()?;
+        self.touch_project(now)?;
+        Ok(())
+    }
+
+    pub fn rename_outline(&mut self, id: Uuid, new_key: &str, now: DateTime<Utc>) -> Result<()> {
+        let entry = self
+            .outline_entries
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .context("outline entry not found")?;
+        let project_dir = self
+            .project_dir
+            .as_ref()
+            .context("no project open")?
+            .clone();
+        self.flush_save(SaveTrigger::BeforeLeave, now)?;
+        let renamed = rename_outline_entry(&project_dir, entry.category, &entry.key, new_key, now)?;
+        self.refresh_outline_entries()?;
+        if self.current_outline.as_ref().map(|e| e.id) == Some(id) {
+            self.current_outline = Some(renamed);
+            self.dirty = false;
+        }
+        self.touch_project(now)?;
+        Ok(())
+    }
+
+    pub fn set_outline_field(
+        &mut self,
+        field_key: &str,
+        value: String,
+        now: DateTime<Utc>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let entry = self
+            .current_outline
+            .as_mut()
+            .context("no outline selected")?;
+        entry.fields.insert(field_key.to_string(), value);
+        entry.meta.updated_at = now;
+        self.on_text_edit(now_ms);
+        Ok(())
+    }
+
+    pub fn add_outline_field(
+        &mut self,
+        field_key: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let key = field_key.into();
+        let entry = self
+            .current_outline
+            .as_mut()
+            .context("no outline selected")?;
+        if entry.fields.contains_key(&key) {
+            bail!("field already exists: {key}");
+        }
+        entry.fields.insert(key, String::new());
+        entry.meta.updated_at = now;
+        self.dirty = true;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn remove_outline_field(&mut self, field_key: &str, now: DateTime<Utc>) -> Result<()> {
+        let entry = self
+            .current_outline
+            .as_mut()
+            .context("no outline selected")?;
+        entry.fields.remove(field_key);
+        entry.meta.updated_at = now;
+        self.dirty = true;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn rename_outline_field(
+        &mut self,
+        old_key: &str,
+        new_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        if old_key == new_key {
+            return Ok(());
+        }
+        let entry = self
+            .current_outline
+            .as_mut()
+            .context("no outline selected")?;
+        if entry.fields.contains_key(new_key) {
+            bail!("field already exists: {new_key}");
+        }
+        let value = entry
+            .fields
+            .remove(old_key)
+            .with_context(|| format!("field not found: {old_key}"))?;
+        entry.fields.insert(new_key.to_string(), value);
+        entry.meta.updated_at = now;
+        self.dirty = true;
+        self.flush_save(SaveTrigger::StructuralChange, now)
     }
 
     pub fn toggle_expanded(&mut self, rel_path: &str) -> Result<()> {
@@ -221,6 +492,7 @@ impl AppState {
         self.current_chapter = Some(chapter);
         self.current_chapter_path = Some(rel_path.to_string());
         self.ui.selected_node = Some(rel_path.to_string());
+        self.current_outline = None;
         self.dirty = false;
         self.save_error = None;
         self.chapter_word_count_baseline = baseline;
@@ -466,7 +738,7 @@ impl AppState {
             SaveAction::ScheduleDebounce => Ok(()),
             SaveAction::SaveNow => {
                 self.debounce.take_pending();
-                if self.current_chapter.is_none() {
+                if self.current_chapter.is_none() && self.current_outline.is_none() {
                     return Ok(());
                 }
                 // 手动保存始终尝试；其余仅在 dirty 时写盘
@@ -478,34 +750,52 @@ impl AppState {
         }
     }
 
-    /// 立即将当前章节与全书字数写盘。失败时保留 dirty 并记录错误。
+    /// 立即将当前章节/大纲与全书字数写盘。失败时保留 dirty 并记录错误。
     pub fn save_now(&mut self) -> Result<()> {
         let result = (|| -> Result<()> {
-            let project_dir = self
-                .project_dir
-                .as_ref()
-                .context("no project open")?
-                .clone();
-            let rel = self
-                .current_chapter_path
-                .as_ref()
-                .context("no chapter open")?
-                .clone();
-            let chapter = self.current_chapter.as_ref().context("no chapter open")?;
-            let new_count = self.chapter_stats_for(chapter).total_words();
-            let path = resolve_rel(&project_dir, &rel)?;
-            save_chapter(&path, chapter)?;
-
-            if let Some(project) = self.project.as_mut() {
-                project.total_word_count = update_book_total(
-                    project.total_word_count,
-                    self.chapter_word_count_baseline,
-                    new_count,
-                );
-                project.updated_at = Utc::now();
+            if let Some(entry) = self.current_outline.clone() {
+                let project_dir = self
+                    .project_dir
+                    .as_ref()
+                    .context("no project open")?
+                    .clone();
+                let path = outline_entry_path(&project_dir, entry.category, &entry.key)?;
+                save_outline_entry(&path, &entry)?;
+                // 同步缓存
+                if let Some(slot) = self.outline_entries.iter_mut().find(|e| e.id == entry.id) {
+                    *slot = entry.clone();
+                }
+                self.current_outline = Some(entry);
             }
-            self.chapter_word_count_baseline = new_count;
-            self.persist_project()?;
+
+            if self.current_chapter.is_some() {
+                let project_dir = self
+                    .project_dir
+                    .as_ref()
+                    .context("no project open")?
+                    .clone();
+                let rel = self
+                    .current_chapter_path
+                    .as_ref()
+                    .context("no chapter open")?
+                    .clone();
+                let chapter = self.current_chapter.as_ref().context("no chapter open")?;
+                let new_count = self.chapter_stats_for(chapter).total_words();
+                let path = resolve_rel(&project_dir, &rel)?;
+                save_chapter(&path, chapter)?;
+
+                if let Some(project) = self.project.as_mut() {
+                    project.total_word_count = update_book_total(
+                        project.total_word_count,
+                        self.chapter_word_count_baseline,
+                        new_count,
+                    );
+                    project.updated_at = Utc::now();
+                }
+                self.chapter_word_count_baseline = new_count;
+                self.persist_project()?;
+            }
+
             self.dirty = false;
             self.save_error = None;
             Ok(())
@@ -664,6 +954,10 @@ impl AppState {
         self.block_multi_select = None;
         self.debounce.cancel();
         self.save_error = None;
+        self.outline_entries.clear();
+        self.current_outline = None;
+        self.search_query.clear();
+        self.full_text_hits.clear();
 
         let path_str = project_dir.to_string_lossy().into_owned();
         add_recent_project(&mut self.config, path_str, project.title.clone(), now);
@@ -673,6 +967,8 @@ impl AppState {
         self.project = Some(project);
         self.dirty = false;
         self.refresh_chapter_tree()?;
+        self.refresh_outline_entries()?;
+        let _ = self.refresh_search_results();
 
         // 恢复 last_opened_chapter
         let last_id = self.project.as_ref().and_then(|p| p.last_opened_chapter);
@@ -1048,5 +1344,96 @@ mod tests {
         let path = resolve_rel(state.project_dir.as_ref().unwrap(), "ch-001.json").unwrap();
         let loaded = load_chapter(&path).unwrap();
         assert_eq!(loaded.blocks[0].content, "甲乙");
+    }
+
+    #[test]
+    fn outline_crud_rename_and_debounced_field_save() {
+        use crate::models::OutlineCategory;
+        use crate::storage::load_outline_entry;
+
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("大纲状态", now()).unwrap();
+        let id = state
+            .create_outline("张三", OutlineCategory::Character, now())
+            .unwrap();
+        assert_eq!(state.outline_entries.len(), 1);
+        assert_eq!(state.current_outline.as_ref().unwrap().key, "张三");
+
+        state.add_outline_field("年龄", now()).unwrap();
+        state
+            .set_outline_field("年龄", "18".into(), now(), 0)
+            .unwrap();
+        assert!(state.dirty);
+        state.tick_autosave(500, now()).unwrap();
+        assert!(!state.dirty);
+
+        let path = outline_entry_path(
+            state.project_dir.as_ref().unwrap(),
+            OutlineCategory::Character,
+            "张三",
+        )
+        .unwrap();
+        let loaded = load_outline_entry(&path).unwrap();
+        assert_eq!(loaded.fields.get("年龄").map(String::as_str), Some("18"));
+
+        state.rename_outline(id, "李四", now()).unwrap();
+        assert_eq!(state.current_outline.as_ref().unwrap().key, "李四");
+        assert!(!path.exists());
+
+        state.delete_outline(id, now()).unwrap();
+        assert!(state.outline_entries.is_empty());
+        assert!(state.current_outline.is_none());
+    }
+
+    #[test]
+    fn open_full_text_hit_selects_block() {
+        use crate::models::BlockType;
+        use crate::services::SearchMode;
+
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("跳转", now()).unwrap();
+        state
+            .create_chapter_under("", "ch-001", "命中章", now())
+            .unwrap();
+        state
+            .set_block_content_at(0, "寻找关键词所在".into(), now(), 0)
+            .unwrap();
+        state.insert_block_at(1, BlockType::Note, now()).unwrap();
+        state
+            .set_block_content_at(1, "备注也有关键词".into(), now(), 1000)
+            .unwrap();
+        state.save_manual(now()).unwrap();
+
+        state.set_search_mode(SearchMode::FullText).unwrap();
+        state.set_search_query("关键词").unwrap();
+        assert_eq!(state.full_text_hits.len(), 2);
+
+        state.open_full_text_hit(1, now()).unwrap();
+        assert_eq!(state.block_focus, BlockFocus::Selected { index: 1 });
+        assert_eq!(
+            state.current_chapter.as_ref().unwrap().blocks[1].content,
+            "备注也有关键词"
+        );
+    }
+
+    #[test]
+    fn settings_update_projects_root_and_max_depth() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("设置", now()).unwrap();
+        let new_root = state
+            .config_path
+            .parent()
+            .unwrap()
+            .join("other-novels")
+            .to_string_lossy()
+            .into_owned();
+        state.set_projects_root(&new_root).unwrap();
+        let reloaded = AppState::load_from(&state.config_path).unwrap();
+        assert_eq!(reloaded.config.projects_root, new_root);
+
+        state.set_max_depth(5, now()).unwrap();
+        assert_eq!(state.project.as_ref().unwrap().settings.max_depth, 5);
+        let loaded = load_project(state.project_dir.as_ref().unwrap()).unwrap();
+        assert_eq!(loaded.settings.max_depth, 5);
     }
 }

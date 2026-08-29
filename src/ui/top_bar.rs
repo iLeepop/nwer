@@ -1,27 +1,49 @@
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, button::Button, button::ButtonVariants as _,
-    h_flex,
+    ActiveTheme as _, Sizable as _, button::Button, button::ButtonVariants as _, h_flex,
+    menu::DropdownMenu,
 };
+use serde::Deserialize;
 
 use crate::app::AppState;
 use crate::ui::Workspace;
+use crate::ui::editor::SaveDocument;
+
+actions!(
+    top_bar_menu,
+    [
+        NewProject,
+        OpenProject,
+        QuitApp,
+        ToggleSidebar,
+        ToggleAiPanel,
+        OpenSettings,
+        // 撤销/重做：第一版依赖 GPUI Input 组件内置 undo；菜单项作占位提示
+        UndoPlaceholder,
+        RedoPlaceholder,
+    ]
+);
+
+/// 打开最近列表第 N 项。
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = nwer, no_json)]
+pub struct OpenRecentAt(pub usize);
 
 pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl IntoElement {
     let title = state.current_title().to_string();
     let dirty_mark = if state.dirty { " ●" } else { "" };
     let project_label = format!("{title}{dirty_mark}");
-    let recent_hint = state
-        .config
-        .recent_projects
-        .first()
-        .map(|r| format!("打开最近: {}", r.title))
-        .unwrap_or_else(|| "打开最近（无）".to_string());
-    let has_recent = !state.config.recent_projects.is_empty();
-    let ai_label = if state.ui.ai_panel_open {
-        "视图·收起 AI"
+    let can_save = state.current_chapter.is_some() || state.current_outline.is_some();
+    let recent = state.config.recent_projects.clone();
+    let sidebar_label = if state.ui.sidebar_visible {
+        "隐藏左栏"
     } else {
-        "视图·展开 AI"
+        "显示左栏"
+    };
+    let ai_label = if state.ui.ai_panel_open {
+        "隐藏 AI 面板"
+    } else {
+        "显示 AI 面板"
     };
 
     h_flex()
@@ -35,70 +57,97 @@ pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl
         .border_color(cx.theme().border)
         .bg(cx.theme().background)
         .child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(cx.theme().border)
-                .child(project_label),
+            Button::new("project-dropdown")
+                .small()
+                .label(project_label)
+                .dropdown_menu({
+                    let recent = recent.clone();
+                    move |mut menu, _, _| {
+                        if recent.is_empty() {
+                            menu = menu.menu("最近项目（无）", Box::new(OpenProject));
+                        } else {
+                            for (i, item) in recent.iter().take(10).enumerate() {
+                                menu = menu.menu(
+                                    format!("{} — {}", item.title, item.path),
+                                    Box::new(OpenRecentAt(i)),
+                                );
+                            }
+                        }
+                        menu
+                    }
+                }),
         )
         .child(
             Button::new("new-project")
                 .primary()
                 .small()
-                .label("新建示例项目")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Err(err) = this.create_sample_project() {
-                        eprintln!("new project failed: {err:#}");
-                    }
-                    cx.notify();
+                .label("新建")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.prompt_new_project(window, cx);
                 })),
         )
         .child(
-            Button::new("open-recent")
+            Button::new("open-project")
                 .small()
-                .label(recent_hint)
-                .disabled(!has_recent)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Err(err) = this.open_most_recent() {
-                        eprintln!("open recent failed: {err:#}");
-                    }
-                    cx.notify();
+                .label("打开")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.prompt_open_project(window, cx);
                 })),
         )
         .child(div().flex_1())
         .child(
-            Button::new("save-doc")
-                .small()
-                .label("保存")
-                .disabled(state.current_chapter.is_none())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.save_document(cx);
-                })),
-        )
-        .child(
             h_flex()
                 .gap_1()
-                .child(menu_placeholder("文件"))
-                .child(menu_placeholder("编辑"))
+                .child(file_menu(can_save))
+                .child(edit_menu())
+                .child(view_menu(sidebar_label, ai_label))
                 .child(
-                    Button::new("toggle-ai")
+                    Button::new("menu-settings")
                         .ghost()
                         .small()
-                        .label(ai_label)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.toggle_ai_panel();
-                            cx.notify();
+                        .label("设置")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.prompt_settings(window, cx);
                         })),
-                )
-                .child(menu_placeholder("设置")),
+                ),
         )
 }
 
-fn menu_placeholder(label: &'static str) -> impl IntoElement {
-    Button::new(format!("menu-{label}"))
+fn file_menu(can_save: bool) -> impl IntoElement {
+    Button::new("menu-file")
         .ghost()
         .small()
-        .label(label)
+        .label("文件")
+        .dropdown_menu(move |menu, _, _| {
+            let mut menu = menu
+                .menu("新建项目", Box::new(NewProject))
+                .menu("打开项目", Box::new(OpenProject));
+            if can_save {
+                menu = menu.menu("保存", Box::new(SaveDocument));
+            }
+            menu.separator().menu("退出", Box::new(QuitApp))
+        })
+}
+
+fn edit_menu() -> impl IntoElement {
+    Button::new("menu-edit")
+        .ghost()
+        .small()
+        .label("编辑")
+        .dropdown_menu(|menu, _, _| {
+            // 第一版：撤销/重做范围限于当前文本输入；GPUI Input 自带 undo/redo。
+            menu.menu("撤销（输入框内置）", Box::new(UndoPlaceholder))
+                .menu("重做（输入框内置）", Box::new(RedoPlaceholder))
+        })
+}
+
+fn view_menu(sidebar_label: &'static str, ai_label: &'static str) -> impl IntoElement {
+    Button::new("menu-view")
+        .ghost()
+        .small()
+        .label("视图")
+        .dropdown_menu(move |menu, _, _| {
+            menu.menu(sidebar_label, Box::new(ToggleSidebar))
+                .menu(ai_label, Box::new(ToggleAiPanel))
+        })
 }

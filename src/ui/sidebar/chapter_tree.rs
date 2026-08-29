@@ -58,7 +58,7 @@ pub fn render_chapter_tree(state: &AppState, cx: &mut Context<'_, Workspace>) ->
                     ]
                 } else {
                     state
-                        .chapter_tree
+                        .displayed_chapter_tree()
                         .iter()
                         .flat_map(|n| render_node(n, 0, state, cx))
                         .collect()

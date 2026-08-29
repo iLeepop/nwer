@@ -13,7 +13,10 @@ pub use chapter_tree::{
     find_node_by_rel, is_nonempty_directory, move_node, move_sibling, rename_node, resolve_rel,
     scan_chapter_tree,
 };
-pub use outline_store::{load_outline_entry, outline_entry_path, save_outline_entry};
+pub use outline_store::{
+    create_outline_entry, delete_outline_entry, list_outline_entries, load_outline_entry,
+    outline_entry_path, rename_outline_entry, save_outline_entry,
+};
 pub use path_validation::validate_storage_name;
 pub use project_store::{
     AppConfig, RecentProject, RuleViolation, add_recent_project, check_can_create_chapter,
