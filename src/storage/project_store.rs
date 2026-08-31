@@ -55,6 +55,65 @@ pub struct RecentProject {
     pub last_opened: DateTime<Utc>,
 }
 
+/// 全局 AI 连接设置（所有项目共用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiSettings {
+    /// snake_case：`deepseek` | `kimi` | `ollama` | `vllm` | `local`
+    pub provider: String,
+    pub api_key: String,
+    pub base_url: String,
+    /// 自由文本模型 id
+    pub model: String,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            provider: "deepseek".into(),
+            api_key: String::new(),
+            base_url: default_base_url_for_provider("deepseek")
+                .unwrap_or_else(|| "https://api.deepseek.com".into()),
+            model: String::new(),
+        }
+    }
+}
+
+/// 提供商列表（UI 下拉用）：`(id, 显示名)`。
+pub fn ai_providers() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("deepseek", "DeepSeek"),
+        ("kimi", "Kimi"),
+        ("ollama", "Ollama"),
+        ("vllm", "vLLM"),
+        ("local", "Local"),
+    ]
+}
+
+/// 切换提供商时写入的默认调用地址。
+pub fn default_base_url_for_provider(provider: &str) -> Option<String> {
+    let url = match provider {
+        "deepseek" => "https://api.deepseek.com",
+        "kimi" => "https://api.moonshot.cn/v1",
+        "ollama" => "http://127.0.0.1:11434",
+        "vllm" => "http://127.0.0.1:8000",
+        "local" => "http://127.0.0.1:8080",
+        _ => return None,
+    };
+    Some(url.to_string())
+}
+
+/// 设置保存校验：`projects_root` 必填；非空 `base_url` 须以 http(s) 开头。
+pub fn validate_settings_save(projects_root: &str, base_url: &str) -> Result<()> {
+    if projects_root.trim().is_empty() {
+        bail!("projects_root must not be empty");
+    }
+    let url = base_url.trim();
+    if !url.is_empty() && !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("base_url must start with http:// or https://");
+    }
+    Ok(())
+}
+
 /// 应用配置（平台配置目录下 `nwer/config.json`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -63,6 +122,8 @@ pub struct AppConfig {
     pub recent_projects: Vec<RecentProject>,
     #[serde(default = "default_max_recent")]
     pub max_recent: usize,
+    #[serde(default)]
+    pub ai: AiSettings,
 }
 
 fn default_max_recent() -> usize {
@@ -75,6 +136,7 @@ impl Default for AppConfig {
             projects_root: "~/Documents/Novels".to_string(),
             recent_projects: Vec::new(),
             max_recent: default_max_recent(),
+            ai: AiSettings::default(),
         }
     }
 }
@@ -522,5 +584,57 @@ mod tests {
         let dir = tempdir().unwrap();
         let loaded = load_config_from(&dir.path().join("missing.json")).unwrap();
         assert_eq!(loaded, AppConfig::default());
+    }
+
+    #[test]
+    fn legacy_config_without_ai_deserializes_defaults() {
+        let json = r#"{
+            "projects_root": "~/Novels",
+            "recent_projects": [],
+            "max_recent": 10
+        }"#;
+        let loaded: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.projects_root, "~/Novels");
+        assert_eq!(loaded.ai, AiSettings::default());
+        assert_eq!(loaded.ai.provider, "deepseek");
+        assert_eq!(loaded.ai.base_url, "https://api.deepseek.com");
+    }
+
+    #[test]
+    fn ai_settings_roundtrip_json() {
+        let ai = AiSettings {
+            provider: "kimi".into(),
+            api_key: "sk-test".into(),
+            base_url: "https://api.moonshot.cn/v1".into(),
+            model: "moonshot-v1".into(),
+        };
+        let json = serde_json::to_string(&ai).unwrap();
+        let back: AiSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ai);
+    }
+
+    #[test]
+    fn default_base_url_for_known_providers() {
+        assert_eq!(
+            default_base_url_for_provider("deepseek").as_deref(),
+            Some("https://api.deepseek.com")
+        );
+        assert_eq!(
+            default_base_url_for_provider("kimi").as_deref(),
+            Some("https://api.moonshot.cn/v1")
+        );
+        assert_eq!(
+            default_base_url_for_provider("ollama").as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert!(default_base_url_for_provider("unknown").is_none());
+    }
+
+    #[test]
+    fn validate_settings_save_rules() {
+        assert!(validate_settings_save("~/x", "").is_ok());
+        assert!(validate_settings_save("~/x", "https://api.example.com").is_ok());
+        assert!(validate_settings_save("  ", "").is_err());
+        assert!(validate_settings_save("~/x", "ftp://bad").is_err());
     }
 }

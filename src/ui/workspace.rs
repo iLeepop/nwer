@@ -495,57 +495,8 @@ impl Workspace {
     }
 
     pub(crate) fn prompt_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.state.config.projects_root.clone();
-        let depth = self.state.max_depth().to_string();
-        let root_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("项目根目录")
-                .default_value(root)
-        });
-        let depth_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("当前项目 max_depth")
-                .default_value(depth)
-        });
         let workspace = cx.entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let root_input = root_input.clone();
-            let depth_input = depth_input.clone();
-            let workspace = workspace.clone();
-            dialog
-                .title("设置")
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(div().text_sm().child("项目根目录 (projects_root)"))
-                        .child(Input::new(&root_input))
-                        .child(div().text_sm().child("当前项目最大层级 (max_depth)"))
-                        .child(Input::new(&depth_input)),
-                )
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("保存")
-                        .show_cancel(true)
-                        .cancel_text("取消")
-                        .on_ok(move |_, _, cx| {
-                            let root = root_input.read(cx).value().to_string();
-                            let depth = depth_input.read(cx).value().to_string();
-                            if let Err(err) = workspace.update(cx, |this, cx| {
-                                this.state.set_projects_root(root.trim())?;
-                                if this.state.project.is_some() {
-                                    let d: u32 = depth.trim().parse().unwrap_or(3);
-                                    this.state.set_max_depth(d, Utc::now())?;
-                                }
-                                cx.notify();
-                                anyhow::Ok(())
-                            }) {
-                                eprintln!("settings failed: {err:#}");
-                                return false;
-                            }
-                            true
-                        }),
-                )
-        });
+        crate::ui::settings::open_settings_dialog(workspace, window, cx);
     }
 
     pub(crate) fn open_recent_at(&mut self, index: usize) -> anyhow::Result<()> {

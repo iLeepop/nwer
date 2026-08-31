@@ -21,9 +21,10 @@ pub use outline_store::{
 };
 pub use path_validation::validate_storage_name;
 pub use project_store::{
-    AppConfig, RecentProject, RuleViolation, add_recent_project, check_can_create_chapter,
-    check_can_create_directory, config_path, create_project, load_config, load_config_from,
-    load_project, remove_recent_project, save_config, save_config_to, save_project,
+    AiSettings, AppConfig, RecentProject, RuleViolation, add_recent_project, ai_providers,
+    check_can_create_chapter, check_can_create_directory, config_path, create_project,
+    default_base_url_for_provider, load_config, load_config_from, load_project,
+    remove_recent_project, save_config, save_config_to, save_project, validate_settings_save,
 };
 pub use script_store::{load_script, save_script};
 pub use script_tree::{

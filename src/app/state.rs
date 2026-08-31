@@ -364,6 +364,18 @@ impl AppState {
         self.persist_project()
     }
 
+    /// 当前全局 AI 设置（借用 config）。
+    pub fn ai_settings(&self) -> &crate::storage::AiSettings {
+        &self.config.ai
+    }
+
+    /// 更新全局 AI 设置并写入 config.json。
+    pub fn set_ai_settings(&mut self, ai: crate::storage::AiSettings) -> Result<()> {
+        self.config.ai = ai;
+        save_config_to(&self.config_path, &self.config)?;
+        Ok(())
+    }
+
     pub fn current_title(&self) -> &str {
         self.project
             .as_ref()
@@ -2140,5 +2152,20 @@ mod tests {
         assert_eq!(state.project.as_ref().unwrap().settings.max_depth, 5);
         let loaded = load_project(state.project_dir.as_ref().unwrap()).unwrap();
         assert_eq!(loaded.settings.max_depth, 5);
+    }
+
+    #[test]
+    fn set_ai_settings_persists_and_reloads() {
+        let (_dir, mut state) = state_with_temp_root();
+        let ai = crate::storage::AiSettings {
+            provider: "kimi".into(),
+            api_key: "sk-abc".into(),
+            base_url: "https://api.moonshot.cn/v1".into(),
+            model: "moonshot-v1".into(),
+        };
+        state.set_ai_settings(ai.clone()).unwrap();
+        assert_eq!(state.ai_settings(), &ai);
+        let reloaded = AppState::load_from(&state.config_path).unwrap();
+        assert_eq!(reloaded.config.ai, ai);
     }
 }
