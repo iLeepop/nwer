@@ -1,12 +1,8 @@
-use std::sync::{Arc, Mutex};
-
 use rai_l::agent::core::{ToolParameters, ToolRegister};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::ai::InMemoryMutator;
-
-pub type SharedMutator = Arc<Mutex<InMemoryMutator>>;
+use super::SharedCtx;
 
 #[derive(Debug, Deserialize)]
 struct EmptyArgs {}
@@ -21,11 +17,9 @@ struct ScriptIdArgs {
     script_id: Uuid,
 }
 
-pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
-    let mut reg = ToolRegister::new();
-
+pub fn build_read_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "get_project_meta",
             "获取项目标题、风格指南与简介",
@@ -35,9 +29,10 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "additionalProperties": false,
             })),
             move |_: EmptyArgs| {
-                let state = state.clone();
+                let ctx = ctx.clone();
                 async move {
-                    let m = state.lock().map_err(|e| e.to_string())?;
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    let m = &guard.mutator;
                     Ok(serde_json::json!({
                         "title": m.title,
                         "style_guide": m.style_guide,
@@ -49,7 +44,7 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
     }
 
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "list_chapters",
             "列出所有章节的 id 与标题",
@@ -59,10 +54,11 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "additionalProperties": false,
             })),
             move |_: EmptyArgs| {
-                let state = state.clone();
+                let ctx = ctx.clone();
                 async move {
-                    let m = state.lock().map_err(|e| e.to_string())?;
-                    let chapters: Vec<_> = m
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    let chapters: Vec<_> = guard
+                        .mutator
                         .list_chapters()
                         .into_iter()
                         .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
@@ -74,7 +70,7 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
     }
 
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "list_scripts",
             "列出所有剧本的 id 与标题",
@@ -84,10 +80,11 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "additionalProperties": false,
             })),
             move |_: EmptyArgs| {
-                let state = state.clone();
+                let ctx = ctx.clone();
                 async move {
-                    let m = state.lock().map_err(|e| e.to_string())?;
-                    let scripts: Vec<_> = m
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    let scripts: Vec<_> = guard
+                        .mutator
                         .list_scripts()
                         .into_iter()
                         .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
@@ -99,7 +96,7 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
     }
 
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "get_outline_tree",
             "获取大纲条目列表（按分类与 key）",
@@ -109,17 +106,17 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "additionalProperties": false,
             })),
             move |_: EmptyArgs| {
-                let state = state.clone();
+                let ctx = ctx.clone();
                 async move {
-                    let m = state.lock().map_err(|e| e.to_string())?;
-                    Ok(serde_json::json!({ "entries": m.get_outline() }))
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({ "entries": guard.mutator.get_outline() }))
                 }
             },
         );
     }
 
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "get_chapter_blocks",
             "获取指定章节的正文块列表",
@@ -131,10 +128,10 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "required": ["chapter_id"],
             })),
             move |args: ChapterIdArgs| {
-                let state = state.clone();
+                let ctx = ctx.clone();
                 async move {
-                    let m = state.lock().map_err(|e| e.to_string())?;
-                    match m.chapter_blocks(args.chapter_id) {
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    match guard.mutator.chapter_blocks(args.chapter_id) {
                         Some(blocks) => Ok(serde_json::json!({ "blocks": blocks })),
                         None => Ok(serde_json::json!({
                             "error": "not_found",
@@ -147,7 +144,7 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
     }
 
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "get_script",
             "获取指定剧本的全文块",
@@ -159,11 +156,13 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "required": ["script_id"],
             })),
             move |args: ScriptIdArgs| {
-                let state = state.clone();
+                let ctx = ctx.clone();
                 async move {
-                    let m = state.lock().map_err(|e| e.to_string())?;
-                    match m.get_script(args.script_id) {
-                        Some(script) => Ok(serde_json::to_value(script).map_err(|e| e.to_string())?),
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    match guard.mutator.get_script(args.script_id) {
+                        Some(script) => {
+                            Ok(serde_json::to_value(script).map_err(|e| e.to_string())?)
+                        }
                         None => Ok(serde_json::json!({
                             "error": "not_found",
                             "script_id": args.script_id,
@@ -175,7 +174,7 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
     }
 
     {
-        let state = state.clone();
+        let ctx = ctx.clone();
         reg.register(
             "get_selection_context",
             "获取当前编辑器选区/焦点上下文",
@@ -185,18 +184,18 @@ pub fn build_read_tools(state: SharedMutator) -> ToolRegister {
                 "additionalProperties": false,
             })),
             move |_: EmptyArgs| {
-                let _state = state.clone();
+                let _ctx = ctx.clone();
                 async move { Ok(serde_json::json!({})) }
             },
         );
     }
-
-    reg
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::tools::{SharedAiCtx, build_all_tools};
+    use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
     fn sample_chapter_id() -> Uuid {
@@ -205,8 +204,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_chapter_blocks_returns_json() {
-        let state = Arc::new(Mutex::new(InMemoryMutator::with_sample_chapter()));
-        let reg = build_read_tools(state.clone());
+        let ctx = Arc::new(Mutex::new(SharedAiCtx::with_sample_chapter(false)));
+        let reg = build_all_tools(ctx);
         let chapter_id = sample_chapter_id();
         let out = reg
             .call(
@@ -221,8 +220,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_project_meta_returns_title() {
-        let state = Arc::new(Mutex::new(InMemoryMutator::with_sample_chapter()));
-        let reg = build_read_tools(state);
+        let ctx = Arc::new(Mutex::new(SharedAiCtx::with_sample_chapter(false)));
+        let mut reg = ToolRegister::new();
+        build_read_tools(ctx, &mut reg);
         let out = reg
             .call("get_project_meta", serde_json::json!({}))
             .await

@@ -10,4 +10,4 @@ pub use mutator::{InMemoryMutator, ProjectMutator};
 pub use provider::{
     AiAction, AiProvider, AiRequest, AiResponse, ChapterContext, ProjectContext, StubAiProvider,
 };
-pub use tools::build_read_tools;
+pub use tools::{build_all_tools, build_read_tools, SharedAiCtx, SharedCtx};
