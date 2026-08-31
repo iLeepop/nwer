@@ -4,6 +4,8 @@ mod chapter_tree;
 mod outline_store;
 mod path_validation;
 mod project_store;
+mod script_store;
+mod script_tree;
 
 pub use atomic_write::atomic_write;
 pub use chapter_store::{load_chapter, save_chapter};
@@ -22,4 +24,13 @@ pub use project_store::{
     AppConfig, RecentProject, RuleViolation, add_recent_project, check_can_create_chapter,
     check_can_create_directory, config_path, create_project, load_config, load_config_from,
     load_project, remove_recent_project, save_config, save_config_to, save_project,
+};
+pub use script_store::{load_script, save_script};
+pub use script_tree::{
+    ScriptNodeKind, ScriptTreeNode, copy_script, create_directory as create_script_directory,
+    create_script_file, delete_node as delete_script_node,
+    find_node_by_rel as find_script_node_by_rel, find_node_by_script_id,
+    is_nonempty_directory as script_dir_nonempty, move_node as move_script_node,
+    move_sibling as move_script_sibling, rename_node as rename_script_node,
+    resolve_rel as resolve_script_rel, scan_script_tree, scripts_dir,
 };

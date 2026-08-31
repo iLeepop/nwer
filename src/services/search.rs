@@ -6,7 +6,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::models::{BlockType, OutlineEntry};
-use crate::storage::{ChapterTreeNode, RelPath};
+use crate::storage::{ChapterTreeNode, RelPath, ScriptTreeNode};
 
 /// 搜索模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,6 +61,50 @@ fn filter_node(node: &ChapterTreeNode, query: &str) -> Option<ChapterTreeNode> {
 }
 
 fn node_name_matches(node: &ChapterTreeNode, query: &str) -> bool {
+    let q = query.to_lowercase();
+    if node.name.to_lowercase().contains(&q) {
+        return true;
+    }
+    if let Some(title) = &node.title
+        && title.to_lowercase().contains(&q)
+    {
+        return true;
+    }
+    false
+}
+
+/// 名称过滤剧本树：规则同章节树。
+pub fn filter_script_tree_by_name(nodes: &[ScriptTreeNode], query: &str) -> Vec<ScriptTreeNode> {
+    let q = query.trim();
+    if q.is_empty() {
+        return nodes.to_vec();
+    }
+    nodes
+        .iter()
+        .filter_map(|n| filter_script_node(n, q))
+        .collect()
+}
+
+fn filter_script_node(node: &ScriptTreeNode, query: &str) -> Option<ScriptTreeNode> {
+    let self_match = script_node_name_matches(node, query);
+    let filtered_children: Vec<_> = node
+        .children
+        .iter()
+        .filter_map(|c| filter_script_node(c, query))
+        .collect();
+
+    if self_match || !filtered_children.is_empty() {
+        let mut cloned = node.clone();
+        if !self_match {
+            cloned.children = filtered_children;
+        }
+        Some(cloned)
+    } else {
+        None
+    }
+}
+
+fn script_node_name_matches(node: &ScriptTreeNode, query: &str) -> bool {
     let q = query.to_lowercase();
     if node.name.to_lowercase().contains(&q) {
         return true;
@@ -281,6 +325,21 @@ mod tests {
         let (project_dir, _) = create_project(root.path(), "空查询", now()).unwrap();
         create_outline_entry(&project_dir, "甲", OutlineCategory::Character, now()).unwrap();
         assert!(search_full_text(&project_dir, "  ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn name_filter_matches_script_tree() {
+        use crate::storage::{ScriptNodeKind, ScriptTreeNode};
+        let tree = vec![ScriptTreeNode {
+            rel_path: "ep01.json".into(),
+            name: "ep01".into(),
+            kind: ScriptNodeKind::Script,
+            script_id: None,
+            title: Some("第一集".into()),
+            children: vec![],
+        }];
+        let filtered = filter_script_tree_by_name(&tree, "第一集");
+        assert_eq!(filtered.len(), 1);
     }
 
     #[test]

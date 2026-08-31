@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -6,19 +7,24 @@ use chrono::{DateTime, Utc};
 
 use crate::models::{
     Block, BlockFocus, BlockMultiSelect, BlockType, Chapter, OutlineCategory, OutlineEntry, Project,
+    Script, ScriptBlock, ScriptBlockType, ScriptFocus, ScriptMultiSelect,
 };
 use crate::services::autosave::SaveAction;
 use crate::services::{
-    ChapterStats, DebounceTimer, FullTextHit, SaveTrigger, SearchMode, action_for, count_chapter,
-    filter_chapter_tree_by_name, filter_outline_by_name, search_full_text, update_book_total,
+    ChapterStats, DebounceTimer, FullTextHit, SaveTrigger, ScriptStats, SearchMode, action_for,
+    count_chapter, count_script, filter_chapter_tree_by_name, filter_outline_by_name,
+    filter_script_tree_by_name, search_full_text, update_book_total,
 };
 use crate::storage::{
-    ChapterTreeNode, MoveDirection, RelPath, add_recent_project, copy_chapter, create_chapter_file,
-    create_directory, create_outline_entry, create_project, delete_node, delete_outline_entry,
-    find_node_by_chapter_id, is_nonempty_directory, list_outline_entries, load_chapter,
-    load_config_from, load_project, move_node, move_sibling, outline_entry_path, rename_node,
-    rename_outline_entry, resolve_rel, save_chapter, save_config_to, save_outline_entry,
-    save_project, scan_chapter_tree,
+    ChapterTreeNode, MoveDirection, RelPath, ScriptTreeNode, add_recent_project, copy_chapter,
+    copy_script, create_chapter_file, create_directory, create_outline_entry, create_project,
+    create_script_file, delete_node, delete_outline_entry, find_node_by_chapter_id,
+    find_node_by_script_id, is_nonempty_directory, list_outline_entries, load_chapter,
+    load_config_from, load_project, load_script, move_node, move_sibling, outline_entry_path,
+    rename_node, rename_outline_entry, resolve_rel, save_chapter, save_config_to,
+    save_outline_entry, save_project, save_script, scan_chapter_tree, scan_script_tree,
+    scripts_dir, create_script_directory, delete_script_node, move_script_node,
+    move_script_sibling, rename_script_node, resolve_script_rel, script_dir_nonempty,
 };
 use uuid::Uuid;
 
@@ -28,6 +34,7 @@ pub enum SidebarTab {
     #[default]
     Chapters,
     Outline,
+    Scripts,
 }
 
 impl SidebarTab {
@@ -35,12 +42,14 @@ impl SidebarTab {
         match self {
             SidebarTab::Chapters => "chapters",
             SidebarTab::Outline => "outline",
+            SidebarTab::Scripts => "scripts",
         }
     }
 
     pub fn parse(s: &str) -> Self {
         match s {
             "outline" => SidebarTab::Outline,
+            "scripts" => SidebarTab::Scripts,
             _ => SidebarTab::Chapters,
         }
     }
@@ -51,6 +60,7 @@ impl SidebarTab {
 pub struct WorkspaceUi {
     pub sidebar_tab: SidebarTab,
     pub ai_panel_open: bool,
+    pub preview_panel_open: bool,
     pub sidebar_visible: bool,
     /// 相对 `chapters/` 的已展开目录节点。
     pub expanded_nodes: HashSet<String>,
@@ -63,6 +73,7 @@ impl Default for WorkspaceUi {
         Self {
             sidebar_tab: SidebarTab::Chapters,
             ai_panel_open: false,
+            preview_panel_open: false,
             sidebar_visible: true,
             expanded_nodes: HashSet::new(),
             selected_node: None,
@@ -106,6 +117,16 @@ pub struct AppState {
     pub search_mode: SearchMode,
     /// 全文搜索结果。
     pub full_text_hits: Vec<FullTextHit>,
+    /// 扫描得到的剧本树。
+    pub script_tree: Vec<ScriptTreeNode>,
+    /// 当前打开的剧本内容。
+    pub current_script: Option<Script>,
+    /// 当前剧本文件相对路径。
+    pub current_script_path: Option<RelPath>,
+    /// 剧本块焦点状态机。
+    pub script_focus: ScriptFocus,
+    /// 多选相邻剧本块（合并用）。
+    pub script_multi_select: Option<ScriptMultiSelect>,
 }
 
 impl AppState {
@@ -139,6 +160,11 @@ impl AppState {
             search_query: String::new(),
             search_mode: SearchMode::default(),
             full_text_hits: Vec::new(),
+            script_tree: Vec::new(),
+            current_script: None,
+            current_script_path: None,
+            script_focus: ScriptFocus::Idle,
+            script_multi_select: None,
         })
     }
 
@@ -188,6 +214,11 @@ impl AppState {
         let _ = self.persist_ui_state();
     }
 
+    pub fn toggle_preview_panel(&mut self) {
+        self.ui.preview_panel_open = !self.ui.preview_panel_open;
+        let _ = self.persist_ui_state();
+    }
+
     pub fn toggle_sidebar(&mut self) {
         self.ui.sidebar_visible = !self.ui.sidebar_visible;
     }
@@ -228,6 +259,15 @@ impl AppState {
         Ok(())
     }
 
+    pub fn refresh_script_tree(&mut self) -> Result<()> {
+        let Some(project_dir) = self.project_dir.as_ref() else {
+            self.script_tree.clear();
+            return Ok(());
+        };
+        self.script_tree = scan_script_tree(project_dir)?;
+        Ok(())
+    }
+
     pub fn refresh_outline_entries(&mut self) -> Result<()> {
         let Some(project_dir) = self.project_dir.as_ref() else {
             self.outline_entries.clear();
@@ -243,6 +283,14 @@ impl AppState {
             return self.chapter_tree.clone();
         }
         filter_chapter_tree_by_name(&self.chapter_tree, &self.search_query)
+    }
+
+    /// 名称过滤后的剧本树。
+    pub fn displayed_script_tree(&self) -> Vec<ScriptTreeNode> {
+        if self.search_mode != SearchMode::NameFilter || self.search_query.trim().is_empty() {
+            return self.script_tree.clone();
+        }
+        filter_script_tree_by_name(&self.script_tree, &self.search_query)
     }
 
     /// 名称过滤后的大纲列表。
@@ -308,6 +356,10 @@ impl AppState {
         self.current_chapter = None;
         self.current_chapter_path = None;
         self.chapter_word_count_baseline = 0;
+        self.current_script = None;
+        self.current_script_path = None;
+        self.script_focus = ScriptFocus::Idle;
+        self.script_multi_select = None;
         self.block_focus = BlockFocus::Idle;
         self.block_multi_select = None;
         self.ui.selected_node = None;
@@ -493,6 +545,10 @@ impl AppState {
         self.current_chapter_path = Some(rel_path.to_string());
         self.ui.selected_node = Some(rel_path.to_string());
         self.current_outline = None;
+        self.current_script = None;
+        self.current_script_path = None;
+        self.script_focus = ScriptFocus::Idle;
+        self.script_multi_select = None;
         self.dirty = false;
         self.save_error = None;
         self.chapter_word_count_baseline = baseline;
@@ -502,6 +558,40 @@ impl AppState {
 
         if let Some(project) = self.project.as_mut() {
             project.last_opened_chapter = Some(chapter_id);
+            project.updated_at = now;
+        }
+        self.persist_project()?;
+        Ok(())
+    }
+
+    /// 选中并加载剧本到中心编辑区。
+    pub fn select_script(&mut self, rel_path: &str, now: DateTime<Utc>) -> Result<()> {
+        if self.current_script_path.as_deref() != Some(rel_path) {
+            self.flush_save(SaveTrigger::BeforeLeave, now)?;
+        }
+
+        let project_dir = self.project_dir.as_ref().context("no project open")?;
+        let path = resolve_script_rel(project_dir, rel_path)?;
+        let script = load_script(&path)?;
+        let script_id = script.id;
+
+        self.current_script = Some(script);
+        self.current_script_path = Some(rel_path.to_string());
+        self.ui.selected_node = Some(rel_path.to_string());
+        self.current_chapter = None;
+        self.current_chapter_path = None;
+        self.chapter_word_count_baseline = 0;
+        self.current_outline = None;
+        self.dirty = false;
+        self.save_error = None;
+        self.script_focus = ScriptFocus::Idle;
+        self.script_multi_select = None;
+        self.block_focus = BlockFocus::Idle;
+        self.block_multi_select = None;
+        self.debounce.cancel();
+
+        if let Some(project) = self.project.as_mut() {
+            project.last_opened_script = Some(script_id);
             project.updated_at = now;
         }
         self.persist_project()?;
@@ -520,11 +610,16 @@ impl AppState {
             .context("no project open")?
             .clone();
         let max = self.max_depth();
-        let rel = create_directory(&project_dir, parent_rel, name, max)?;
+        let rel = match self.ui.sidebar_tab {
+            SidebarTab::Scripts => {
+                create_script_directory(&project_dir, parent_rel, name, max)?
+            }
+            _ => create_directory(&project_dir, parent_rel, name, max)?,
+        };
         if !parent_rel.is_empty() {
             self.ui.expanded_nodes.insert(parent_rel.to_string());
         }
-        self.refresh_chapter_tree()?;
+        self.refresh_active_tree()?;
         self.touch_project(now)?;
         self.persist_ui_state()?;
         Ok(rel)
@@ -555,6 +650,38 @@ impl AppState {
         Ok(rel)
     }
 
+    pub fn create_script_under(
+        &mut self,
+        parent_rel: &str,
+        name: &str,
+        title: &str,
+        now: DateTime<Utc>,
+    ) -> Result<RelPath> {
+        let project_dir = self
+            .project_dir
+            .as_ref()
+            .context("no project open")?
+            .clone();
+        let max = self.max_depth();
+        let script = Script::new(title, now);
+        let rel = create_script_file(&project_dir, parent_rel, name, &script, max)?;
+        if !parent_rel.is_empty() {
+            self.ui.expanded_nodes.insert(parent_rel.to_string());
+        }
+        self.refresh_script_tree()?;
+        self.touch_project(now)?;
+        self.persist_ui_state()?;
+        self.select_script(&rel, now)?;
+        Ok(rel)
+    }
+
+    fn refresh_active_tree(&mut self) -> Result<()> {
+        match self.ui.sidebar_tab {
+            SidebarTab::Scripts => self.refresh_script_tree(),
+            _ => self.refresh_chapter_tree(),
+        }
+    }
+
     pub fn rename_selected(&mut self, new_name: &str, now: DateTime<Utc>) -> Result<RelPath> {
         let rel = self.ui.selected_node.clone().context("no node selected")?;
         self.rename_at(&rel, new_name, now)
@@ -571,9 +698,12 @@ impl AppState {
             .as_ref()
             .context("no project open")?
             .clone();
-        let new_rel = rename_node(&project_dir, rel_path, new_name)?;
+        let new_rel = match self.ui.sidebar_tab {
+            SidebarTab::Scripts => rename_script_node(&project_dir, rel_path, new_name)?,
+            _ => rename_node(&project_dir, rel_path, new_name)?,
+        };
         self.remap_paths_after_rename(rel_path, &new_rel);
-        self.refresh_chapter_tree()?;
+        self.refresh_active_tree()?;
         self.touch_project(now)?;
         self.persist_ui_state()?;
         Ok(new_rel)
@@ -585,9 +715,12 @@ impl AppState {
             .as_ref()
             .context("no project open")?
             .clone();
-        delete_node(&project_dir, rel_path)?;
+        match self.ui.sidebar_tab {
+            SidebarTab::Scripts => delete_script_node(&project_dir, rel_path)?,
+            _ => delete_node(&project_dir, rel_path)?,
+        };
         self.clear_paths_under(rel_path);
-        self.refresh_chapter_tree()?;
+        self.refresh_active_tree()?;
         self.touch_project(now)?;
         self.persist_ui_state()?;
         Ok(())
@@ -595,7 +728,10 @@ impl AppState {
 
     pub fn directory_is_nonempty(&self, rel_path: &str) -> Result<bool> {
         let project_dir = self.project_dir.as_ref().context("no project open")?;
-        is_nonempty_directory(project_dir, rel_path)
+        match self.ui.sidebar_tab {
+            SidebarTab::Scripts => script_dir_nonempty(project_dir, rel_path),
+            _ => is_nonempty_directory(project_dir, rel_path),
+        }
     }
 
     pub fn copy_chapter_at(
@@ -621,6 +757,36 @@ impl AppState {
         Ok(rel)
     }
 
+    pub fn copy_script_at(
+        &mut self,
+        src_rel: &str,
+        dest_parent_rel: &str,
+        new_name: &str,
+        now: DateTime<Utc>,
+    ) -> Result<RelPath> {
+        let project_dir = self
+            .project_dir
+            .as_ref()
+            .context("no project open")?
+            .clone();
+        let max = self.max_depth();
+        let (rel, _) = copy_script(
+            &project_dir,
+            src_rel,
+            dest_parent_rel,
+            new_name,
+            max,
+            now,
+        )?;
+        if !dest_parent_rel.is_empty() {
+            self.ui.expanded_nodes.insert(dest_parent_rel.to_string());
+        }
+        self.refresh_script_tree()?;
+        self.touch_project(now)?;
+        self.persist_ui_state()?;
+        Ok(rel)
+    }
+
     pub fn move_node_to(
         &mut self,
         src_rel: &str,
@@ -633,12 +799,17 @@ impl AppState {
             .context("no project open")?
             .clone();
         let max = self.max_depth();
-        let new_rel = move_node(&project_dir, src_rel, dest_parent_rel, None, max)?;
+        let new_rel = match self.ui.sidebar_tab {
+            SidebarTab::Scripts => {
+                move_script_node(&project_dir, src_rel, dest_parent_rel, None, max)?
+            }
+            _ => move_node(&project_dir, src_rel, dest_parent_rel, None, max)?,
+        };
         self.remap_paths_after_rename(src_rel, &new_rel);
         if !dest_parent_rel.is_empty() {
             self.ui.expanded_nodes.insert(dest_parent_rel.to_string());
         }
-        self.refresh_chapter_tree()?;
+        self.refresh_active_tree()?;
         self.touch_project(now)?;
         self.persist_ui_state()?;
         Ok(new_rel)
@@ -655,9 +826,12 @@ impl AppState {
             .as_ref()
             .context("no project open")?
             .clone();
-        let new_rel = move_sibling(&project_dir, &rel, direction)?;
+        let new_rel = match self.ui.sidebar_tab {
+            SidebarTab::Scripts => move_script_sibling(&project_dir, &rel, direction)?,
+            _ => move_sibling(&project_dir, &rel, direction)?,
+        };
         self.remap_paths_after_rename(&rel, &new_rel);
-        self.refresh_chapter_tree()?;
+        self.refresh_active_tree()?;
         self.touch_project(now)?;
         Ok(new_rel)
     }
@@ -673,11 +847,30 @@ impl AppState {
         Ok(())
     }
 
+    /// 更新当前剧本标题并写盘。
+    pub fn set_current_script_title(&mut self, title: impl Into<String>) -> Result<()> {
+        let title = title.into();
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.title = title;
+        self.dirty = true;
+        self.save_now()?;
+        self.refresh_script_tree()?;
+        Ok(())
+    }
+
     /// 当前章实时统计（尊重项目排除类型）。
     pub fn current_chapter_stats(&self) -> ChapterStats {
         match self.current_chapter.as_ref() {
             Some(ch) => self.chapter_stats_for(ch),
             None => ChapterStats::default(),
+        }
+    }
+
+    /// 当前剧本统计。
+    pub fn current_script_stats(&self) -> ScriptStats {
+        match self.current_script.as_ref() {
+            Some(script) => count_script(script),
+            None => ScriptStats::default(),
         }
     }
 
@@ -738,7 +931,10 @@ impl AppState {
             SaveAction::ScheduleDebounce => Ok(()),
             SaveAction::SaveNow => {
                 self.debounce.take_pending();
-                if self.current_chapter.is_none() && self.current_outline.is_none() {
+                if self.current_chapter.is_none()
+                    && self.current_outline.is_none()
+                    && self.current_script.is_none()
+                {
                     return Ok(());
                 }
                 // 手动保存始终尝试；其余仅在 dirty 时写盘
@@ -793,6 +989,26 @@ impl AppState {
                     project.updated_at = Utc::now();
                 }
                 self.chapter_word_count_baseline = new_count;
+                self.persist_project()?;
+            }
+
+            if self.current_script.is_some() {
+                let project_dir = self
+                    .project_dir
+                    .as_ref()
+                    .context("no project open")?
+                    .clone();
+                let rel = self
+                    .current_script_path
+                    .as_ref()
+                    .context("no script open")?
+                    .clone();
+                let script = self.current_script.as_ref().context("no script open")?;
+                let path = resolve_script_rel(&project_dir, &rel)?;
+                save_script(&path, script)?;
+                if let Some(project) = self.project.as_mut() {
+                    project.updated_at = Utc::now();
+                }
                 self.persist_project()?;
             }
 
@@ -908,6 +1124,22 @@ impl AppState {
         self.flush_save(SaveTrigger::StructuralChange, now)
     }
 
+    pub fn move_block_at(&mut self, from: usize, to: usize, now: DateTime<Utc>) -> Result<()> {
+        let chapter = self.current_chapter.as_mut().context("no chapter open")?;
+        chapter.move_block(from, to)?;
+        self.dirty = true;
+        if let Some(i) = self.block_focus.selected_index() {
+            let new_index = index_after_block_move(i, from, to);
+            self.block_focus = match self.block_focus {
+                BlockFocus::Editing { .. } => BlockFocus::Editing { index: new_index },
+                BlockFocus::Selected { .. } => BlockFocus::Selected { index: new_index },
+                BlockFocus::Idle => BlockFocus::Idle,
+            };
+        }
+        self.block_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
     pub fn click_block(&mut self, index: usize) {
         self.block_focus = self.block_focus.clone().click_block(index);
         self.block_multi_select = None;
@@ -937,6 +1169,151 @@ impl AppState {
         self.block_focus = BlockFocus::Selected { index: a.min(b) };
     }
 
+    // —— 剧本块操作 ——
+
+    pub fn insert_script_block_at(
+        &mut self,
+        index: usize,
+        block_type: ScriptBlockType,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.insert_block(index, ScriptBlock::new(block_type, String::new(), now))?;
+        self.dirty = true;
+        self.script_focus = ScriptFocus::Selected { index };
+        self.script_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn delete_script_block_at(&mut self, index: usize, now: DateTime<Utc>) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.remove_block(index)?;
+        self.dirty = true;
+        self.script_focus = self.script_focus.clone().clamp_to_len(script.blocks.len());
+        self.script_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn set_script_block_type_at(
+        &mut self,
+        index: usize,
+        block_type: ScriptBlockType,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.set_block_type(index, block_type, now)?;
+        self.dirty = true;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn set_script_character_at(
+        &mut self,
+        index: usize,
+        character: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.set_character(index, character, now)?;
+        self.dirty = true;
+        self.on_text_edit(0);
+        Ok(())
+    }
+
+    pub fn set_script_block_content_at(
+        &mut self,
+        index: usize,
+        content: String,
+        now: DateTime<Utc>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.set_block_content(index, content, now)?;
+        self.on_text_edit(now_ms);
+        Ok(())
+    }
+
+    pub fn split_script_block_at_cursor(
+        &mut self,
+        index: usize,
+        byte_offset: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.split_block_at(index, byte_offset, now)?;
+        self.dirty = true;
+        self.script_focus = ScriptFocus::Editing { index: index + 1 };
+        self.script_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn merge_selected_script_blocks(&mut self, now: DateTime<Utc>) -> Result<()> {
+        let range = self
+            .script_multi_select
+            .clone()
+            .context("no multi-selection for merge")?;
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.merge_blocks(range.start, range.end, now)?;
+        self.dirty = true;
+        self.script_focus = ScriptFocus::Selected { index: range.start };
+        self.script_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn swap_script_block_at(&mut self, index: usize, up: bool, now: DateTime<Utc>) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.swap_block(index, up)?;
+        let new_index = if up { index - 1 } else { index + 1 };
+        self.dirty = true;
+        self.script_focus = ScriptFocus::Selected { index: new_index };
+        self.script_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn move_script_block_at(&mut self, from: usize, to: usize, now: DateTime<Utc>) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.move_block(from, to)?;
+        self.dirty = true;
+        if let Some(i) = self.script_focus.selected_index() {
+            let new_index = index_after_block_move(i, from, to);
+            self.script_focus = match self.script_focus {
+                ScriptFocus::Editing { .. } => ScriptFocus::Editing { index: new_index },
+                ScriptFocus::Selected { .. } => ScriptFocus::Selected { index: new_index },
+                ScriptFocus::Idle => ScriptFocus::Idle,
+            };
+        }
+        self.script_multi_select = None;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn click_script_block(&mut self, index: usize) {
+        self.script_focus = self.script_focus.clone().click_block(index);
+        self.script_multi_select = None;
+    }
+
+    pub fn click_script_editor_outside(&mut self) {
+        self.script_focus = self.script_focus.clone().click_outside();
+        self.script_multi_select = None;
+    }
+
+    pub fn escape_script_focus(&mut self) {
+        self.script_focus = self.script_focus.clone().escape();
+    }
+
+    pub fn move_script_block_focus(&mut self, delta: isize) {
+        let count = self
+            .current_script
+            .as_ref()
+            .map(|s| s.blocks.len())
+            .unwrap_or(0);
+        self.script_focus = self.script_focus.clone().move_selection(delta, count);
+        self.script_multi_select = None;
+    }
+
+    pub fn set_script_multi_select(&mut self, a: usize, b: usize) {
+        self.script_multi_select = Some(ScriptMultiSelect::new(a, b));
+        self.script_focus = ScriptFocus::Selected { index: a.min(b) };
+    }
+
     fn set_current_project(
         &mut self,
         project_dir: PathBuf,
@@ -945,6 +1322,7 @@ impl AppState {
     ) -> Result<()> {
         self.ui.sidebar_tab = SidebarTab::parse(&project.ui_state.sidebar_tab);
         self.ui.ai_panel_open = project.ui_state.ai_panel_open;
+        self.ui.preview_panel_open = project.ui_state.preview_panel_open;
         self.ui.expanded_nodes = project.ui_state.expanded_nodes.iter().cloned().collect();
         self.ui.selected_node = None;
         self.current_chapter = None;
@@ -956,6 +1334,10 @@ impl AppState {
         self.save_error = None;
         self.outline_entries.clear();
         self.current_outline = None;
+        self.current_script = None;
+        self.current_script_path = None;
+        self.script_focus = ScriptFocus::Idle;
+        self.script_multi_select = None;
         self.search_query.clear();
         self.full_text_hits.clear();
 
@@ -963,19 +1345,35 @@ impl AppState {
         add_recent_project(&mut self.config, path_str, project.title.clone(), now);
         save_config_to(&self.config_path, &self.config)?;
 
-        self.project_dir = Some(project_dir);
+        self.project_dir = Some(project_dir.clone());
         self.project = Some(project);
         self.dirty = false;
+        if !scripts_dir(&project_dir).exists() {
+            fs::create_dir_all(scripts_dir(&project_dir))?;
+        }
         self.refresh_chapter_tree()?;
+        self.refresh_script_tree()?;
         self.refresh_outline_entries()?;
         let _ = self.refresh_search_results();
 
-        // 恢复 last_opened_chapter
-        let last_id = self.project.as_ref().and_then(|p| p.last_opened_chapter);
-        if let Some(id) = last_id
-            && let Some(node) = find_node_by_chapter_id(&self.chapter_tree, id).cloned()
-        {
-            let _ = self.select_chapter(&node.rel_path, now);
+        match self.ui.sidebar_tab {
+            SidebarTab::Scripts => {
+                let last_id = self.project.as_ref().and_then(|p| p.last_opened_script);
+                if let Some(id) = last_id
+                    && let Some(node) = find_node_by_script_id(&self.script_tree, id).cloned()
+                {
+                    let _ = self.select_script(&node.rel_path, now);
+                }
+            }
+            SidebarTab::Chapters => {
+                let last_id = self.project.as_ref().and_then(|p| p.last_opened_chapter);
+                if let Some(id) = last_id
+                    && let Some(node) = find_node_by_chapter_id(&self.chapter_tree, id).cloned()
+                {
+                    let _ = self.select_chapter(&node.rel_path, now);
+                }
+            }
+            SidebarTab::Outline => {}
         }
         Ok(())
     }
@@ -994,6 +1392,7 @@ impl AppState {
             project.ui_state.expanded_nodes = nodes;
             project.ui_state.sidebar_tab = self.ui.sidebar_tab.as_str().to_string();
             project.ui_state.ai_panel_open = self.ui.ai_panel_open;
+            project.ui_state.preview_panel_open = self.ui.preview_panel_open;
         }
         self.persist_project()
     }
@@ -1027,6 +1426,18 @@ impl AppState {
         {
             self.current_chapter_path = Some(remap_prefix(
                 self.current_chapter_path.as_deref().unwrap_or(""),
+                old,
+                new,
+            ));
+        }
+        if self.current_script_path.as_deref() == Some(old)
+            || self
+                .current_script_path
+                .as_ref()
+                .is_some_and(|p| p.starts_with(&format!("{old}/")))
+        {
+            self.current_script_path = Some(remap_prefix(
+                self.current_script_path.as_deref().unwrap_or(""),
                 old,
                 new,
             ));
@@ -1070,6 +1481,34 @@ impl AppState {
                 project.last_opened_chapter = None;
             }
         }
+        if self.current_script_path.as_deref() == Some(rel)
+            || self
+                .current_script_path
+                .as_ref()
+                .is_some_and(|p| p.starts_with(&prefix))
+        {
+            self.current_script = None;
+            self.current_script_path = None;
+            self.script_focus = ScriptFocus::Idle;
+            self.script_multi_select = None;
+            if let Some(project) = self.project.as_mut() {
+                project.last_opened_script = None;
+            }
+        }
+    }
+}
+
+/// 块拖拽移动后校正焦点索引。
+fn index_after_block_move(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        return if to > from { to - 1 } else { to };
+    }
+    if from < to {
+        if i > from && i < to { i - 1 } else { i }
+    } else if i >= to && i < from {
+        i + 1
+    } else {
+        i
     }
 }
 
@@ -1414,6 +1853,22 @@ mod tests {
             state.current_chapter.as_ref().unwrap().blocks[1].content,
             "备注也有关键词"
         );
+    }
+
+    #[test]
+    fn script_tab_mutual_exclusion() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("剧本项目", now()).unwrap();
+        state
+            .create_script_under("", "sc-001", "第一集", now())
+            .unwrap();
+        assert!(state.current_script.is_some());
+        assert!(state.current_chapter.is_none());
+        state
+            .create_chapter_under("", "ch-001", "第一章", now())
+            .unwrap();
+        assert!(state.current_chapter.is_some());
+        assert!(state.current_script.is_none());
     }
 
     #[test]

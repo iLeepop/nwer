@@ -5,9 +5,44 @@ use gpui_component::{ActiveTheme as _, h_flex};
 use crate::app::AppState;
 
 pub fn render_status_bar(state: &AppState, cx: &App) -> impl IntoElement {
+    let err = state.save_error.clone();
+
+    if state.current_script.is_some() {
+        let stats = state.current_script_stats();
+        return h_flex()
+            .id("status-bar")
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_3()
+            .items_center()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().muted)
+            .text_sm()
+            .child(stat("剧本字数", stats.total_words(), cx))
+            .child(stat("对话行数", stats.dialogue_count, cx))
+            .child(stat("块数", stats.block_count, cx))
+            .when(state.dirty, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child("未保存"),
+                )
+            })
+            .children(err.map(|e| {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child(format!("保存失败: {e}"))
+                    .into_any_element()
+            }))
+            .into_any_element();
+    }
+
     let stats = state.current_chapter_stats();
     let book_total = state.displayed_book_total();
-    let err = state.save_error.clone();
 
     h_flex()
         .id("status-bar")
@@ -41,6 +76,7 @@ pub fn render_status_bar(state: &AppState, cx: &App) -> impl IntoElement {
                 .child(format!("保存失败: {e}"))
                 .into_any_element()
         }))
+        .into_any_element()
 }
 
 fn stat(label: &str, value: u64, cx: &App) -> impl IntoElement {

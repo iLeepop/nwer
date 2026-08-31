@@ -37,6 +37,8 @@ pub struct AiRequest {
     pub chapter_context: ChapterContext,
     pub selected_blocks: Vec<Block>,
     pub outline_entries: Vec<OutlineEntry>,
+    /// 当前剧本文本摘要（Plain-text，带类型前缀）。
+    pub script_excerpt: Option<String>,
     pub prompt: String,
     pub action: AiAction,
 }
@@ -85,6 +87,7 @@ mod tests {
             },
             selected_blocks: vec![Block::new(BlockType::Narration, "正文", now)],
             outline_entries: vec![OutlineEntry::new("角色甲", OutlineCategory::Character, now)],
+            script_excerpt: None,
             prompt: "继续写下去".into(),
             action: AiAction::Continue,
         }

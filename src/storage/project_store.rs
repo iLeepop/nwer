@@ -162,6 +162,13 @@ pub fn create_project(
         )
     })?;
 
+    fs::create_dir_all(project_dir.join("scripts")).with_context(|| {
+        format!(
+            "failed to create scripts dir under {}",
+            project_dir.display()
+        )
+    })?;
+
     for category in OutlineCategory::all() {
         let dir = project_dir.join("outline").join(category.label());
         fs::create_dir_all(&dir)
@@ -296,6 +303,7 @@ mod tests {
 
         assert!(project_dir.join("project.json").is_file());
         assert!(project_dir.join("chapters").is_dir());
+        assert!(project_dir.join("scripts").is_dir());
         for label in ["角色", "背景", "场景", "事件", "杂项"] {
             assert!(
                 project_dir.join("outline").join(label).is_dir(),

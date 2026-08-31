@@ -27,6 +27,8 @@ pub struct UiState {
     pub sidebar_tab: String,
     #[serde(default)]
     pub ai_panel_open: bool,
+    #[serde(default)]
+    pub preview_panel_open: bool,
 }
 
 fn default_sidebar_tab() -> String {
@@ -39,6 +41,7 @@ impl Default for UiState {
             expanded_nodes: Vec::new(),
             sidebar_tab: default_sidebar_tab(),
             ai_panel_open: false,
+            preview_panel_open: false,
         }
     }
 }
@@ -61,6 +64,8 @@ pub struct Project {
     #[serde(default)]
     pub last_opened_chapter: Option<Uuid>,
     #[serde(default)]
+    pub last_opened_script: Option<Uuid>,
+    #[serde(default)]
     pub total_word_count: u64,
     pub settings: ProjectSettings,
     pub ui_state: UiState,
@@ -76,6 +81,7 @@ impl Project {
             created_at: now,
             updated_at: now,
             last_opened_chapter: None,
+            last_opened_script: None,
             total_word_count: 0,
             settings: ProjectSettings::default(),
             ui_state: UiState::default(),

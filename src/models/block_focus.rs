@@ -25,13 +25,9 @@ impl BlockFocus {
         matches!(self, BlockFocus::Editing { .. })
     }
 
-    /// 第一次单击：选中；再次单击已选中块：进入编辑。
+    /// 单击块：直接进入编辑。
     pub fn click_block(self, index: usize) -> Self {
-        match self {
-            BlockFocus::Selected { index: i } if i == index => BlockFocus::Editing { index },
-            BlockFocus::Editing { index: i } if i == index => BlockFocus::Editing { index },
-            _ => BlockFocus::Selected { index },
-        }
+        BlockFocus::Editing { index }
     }
 
     /// 单击块外：结束编辑（回到空闲）。
@@ -106,20 +102,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn click_selects_then_edits() {
-        let mut focus = BlockFocus::Idle;
-        focus = focus.click_block(2);
-        assert_eq!(focus, BlockFocus::Selected { index: 2 });
-        focus = focus.click_block(2);
-        assert_eq!(focus, BlockFocus::Editing { index: 2 });
-        focus = focus.click_block(2);
-        assert_eq!(focus, BlockFocus::Editing { index: 2 });
+    fn click_enters_editing() {
+        assert_eq!(
+            BlockFocus::Idle.click_block(2),
+            BlockFocus::Editing { index: 2 }
+        );
+        assert_eq!(
+            BlockFocus::Selected { index: 1 }.click_block(2),
+            BlockFocus::Editing { index: 2 }
+        );
+        assert_eq!(
+            BlockFocus::Editing { index: 1 }.click_block(1),
+            BlockFocus::Editing { index: 1 }
+        );
     }
 
     #[test]
-    fn click_other_block_selects() {
+    fn click_other_block_edits() {
         let focus = BlockFocus::Editing { index: 1 }.click_block(3);
-        assert_eq!(focus, BlockFocus::Selected { index: 3 });
+        assert_eq!(focus, BlockFocus::Editing { index: 3 });
     }
 
     #[test]

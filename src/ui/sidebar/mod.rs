@@ -1,5 +1,6 @@
 pub(crate) mod chapter_tree;
 pub(crate) mod outline_tree;
+pub(crate) mod script_tree;
 
 use gpui::*;
 use gpui_component::{
@@ -21,6 +22,7 @@ pub fn render_sidebar(
     let selected = match state.ui.sidebar_tab {
         SidebarTab::Chapters => 0,
         SidebarTab::Outline => 1,
+        SidebarTab::Scripts => 2,
     };
     let mode = state.search_mode;
     let is_full_text = mode == SearchMode::FullText;
@@ -41,12 +43,14 @@ pub fn render_sidebar(
                 .on_click(cx.listener(|this, index, _, cx| {
                     this.state.set_sidebar_tab(match *index {
                         1 => SidebarTab::Outline,
+                        2 => SidebarTab::Scripts,
                         _ => SidebarTab::Chapters,
                     });
                     cx.notify();
                 }))
                 .child(Tab::new().label("章节"))
-                .child(Tab::new().label("大纲")),
+                .child(Tab::new().label("大纲"))
+                .child(Tab::new().label("剧本")),
         )
         .child(
             v_flex()
@@ -106,6 +110,10 @@ pub fn render_sidebar(
                         }
                         SidebarTab::Outline => {
                             outline_tree::render_outline_tree(&workspace.state, cx)
+                                .into_any_element()
+                        }
+                        SidebarTab::Scripts => {
+                            script_tree::render_script_tree(&workspace.state, cx)
                                 .into_any_element()
                         }
                     }

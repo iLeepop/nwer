@@ -3,22 +3,36 @@ use std::time::Duration;
 use chrono::Utc;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt, WindowExt as _, button::Button,
-    dialog::DialogButtonProps, h_flex, input::Input, input::InputEvent, input::InputState,
-    input::TextareaState, resizable::h_resizable, resizable::resizable_panel, v_flex,
+    ActiveTheme as _, Disableable as _, IndexPath, Root, Sizable as _, StyledExt, WindowExt as _,
+    button::Button,
+    dialog::DialogButtonProps,
+    h_flex,
+    input::Input,
+    input::InputEvent,
+    input::InputState,
+    input::RopeExt as _,
+    input::TextareaState,
+    resizable::h_resizable,
+    resizable::resizable_panel,
+    select::{Select, SelectState},
+    v_flex,
 };
 
 use crate::app::AppState;
-use crate::models::{BlockFocus, BlockType, OutlineCategory};
-use crate::storage::{ChapterNodeKind, MoveDirection, find_node_by_rel};
+use crate::app::SidebarTab;
+use crate::models::{BlockFocus, BlockType, OutlineCategory, ScriptFocus};
+use crate::storage::{
+    ChapterNodeKind, MoveDirection, ScriptNodeKind, find_node_by_rel, find_script_node_by_rel,
+};
 use crate::ui::editor::{
     DeleteFocusedBlock, EscapeBlockFocus, FocusNextBlock, FocusPrevBlock, MergeSelectedBlocks,
-    MoveFocusedBlockDown, MoveFocusedBlockUp, SaveDocument, SetTypeDialogue, SetTypeNarration,
-    SetTypeNote, SetTypeSceneBreak,
+    MoveFocusedBlockDown, MoveFocusedBlockUp, SaveDocument, SetTypeAside, SetTypeDialogue,
+    SetTypeNarration, SetTypeNote, SetTypeSceneBreak, SetTypeThought,
 };
 use crate::ui::sidebar::chapter_tree::{
     CopyChapter, DeleteNode, MoveDown, MoveUp, NewChapter, NewDirectory, RenameNode,
 };
+use crate::ui::sidebar::script_tree::CopyScript;
 use crate::ui::sidebar::outline_tree::{DeleteOutlineEntry, NewOutlineEntry, RenameOutlineEntry};
 use crate::ui::{ai_panel, editor, sidebar, status_bar, top_bar};
 use std::collections::HashMap;
@@ -28,6 +42,7 @@ pub struct Workspace {
     pub(crate) title_input: Option<Entity<InputState>>,
     pub(crate) editing_input: Option<(usize, Entity<TextareaState>)>,
     pub(crate) speaker_input: Option<(usize, Entity<InputState>)>,
+    pub(crate) character_input: Option<(usize, Entity<InputState>)>,
     pub(crate) search_input: Option<Entity<InputState>>,
     pub(crate) outline_field_name_inputs: HashMap<String, Entity<InputState>>,
     pub(crate) outline_field_value_inputs: HashMap<String, Entity<TextareaState>>,
@@ -48,6 +63,7 @@ impl Workspace {
             title_input: None,
             editing_input: None,
             speaker_input: None,
+            character_input: None,
             search_input: None,
             outline_field_name_inputs: HashMap::new(),
             outline_field_value_inputs: HashMap::new(),
@@ -84,6 +100,12 @@ impl Workspace {
         self._edit_subscriptions.clear();
     }
 
+    pub(crate) fn invalidate_script_editor_inputs(&mut self) {
+        self.editing_input = None;
+        self.character_input = None;
+        self._edit_subscriptions.clear();
+    }
+
     pub(crate) fn invalidate_outline_inputs(&mut self) {
         self.outline_field_name_inputs.clear();
         self.outline_field_value_inputs.clear();
@@ -100,17 +122,15 @@ impl Workspace {
                 .placeholder("搜索……")
                 .default_value(query)
         });
-        let workspace = cx.entity();
+        // subscribe_in already provides &mut Workspace — do not nest workspace.update().
         self._search_subscription = Some(cx.subscribe_in(&input, window, {
-            move |_this, state, event, _, cx| {
+            move |this, state, event, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     let text = state.read(cx).value().to_string();
-                    workspace.update(cx, |this, cx| {
-                        if let Err(err) = this.state.set_search_query(text) {
-                            eprintln!("search failed: {err:#}");
-                        }
-                        cx.notify();
-                    });
+                    if let Err(err) = this.state.set_search_query(text) {
+                        eprintln!("search failed: {err:#}");
+                    }
+                    cx.notify();
                 }
             }
         }));
@@ -146,61 +166,50 @@ impl Workspace {
                     .default_value(value)
             });
 
-            let workspace = cx.entity();
             let field_key = key.clone();
             self._outline_subscriptions
                 .push(cx.subscribe_in(&name_input, window, {
-                    let workspace = workspace.clone();
                     let old_key = field_key.clone();
-                    move |_this, state, event, window, cx| {
+                    move |this, state, event, window, cx| {
                         if matches!(event, InputEvent::Blur) {
                             let new_key = state.read(cx).value().to_string();
                             let new_key = new_key.trim().to_string();
                             if new_key.is_empty() || new_key == old_key {
                                 return;
                             }
-                            workspace.update(cx, |this, cx| {
-                                if let Err(err) =
-                                    this.state
-                                        .rename_outline_field(&old_key, &new_key, Utc::now())
-                                {
-                                    eprintln!("rename field failed: {err:#}");
-                                    // 恢复显示
-                                    if let Some(input) =
-                                        this.outline_field_name_inputs.get(&old_key)
-                                    {
-                                        input.update(cx, |s, cx| {
-                                            s.set_value(old_key.clone(), window, cx);
-                                        });
-                                    }
-                                } else {
-                                    this.invalidate_outline_inputs();
-                                    this.ensure_outline_form(window, cx);
+                            if let Err(err) =
+                                this.state
+                                    .rename_outline_field(&old_key, &new_key, Utc::now())
+                            {
+                                eprintln!("rename field failed: {err:#}");
+                                if let Some(input) = this.outline_field_name_inputs.get(&old_key) {
+                                    input.update(cx, |s, cx| {
+                                        s.set_value(old_key.clone(), window, cx);
+                                    });
                                 }
-                                cx.notify();
-                            });
+                            } else {
+                                this.invalidate_outline_inputs();
+                                this.ensure_outline_form(window, cx);
+                            }
+                            cx.notify();
                         }
                     }
                 }));
 
-            let workspace = cx.entity();
             let field_key = key.clone();
             self._outline_subscriptions
                 .push(cx.subscribe_in(&value_input, window, {
-                    let workspace = workspace.clone();
-                    move |_this, state, event, _, cx| {
+                    move |this, state, event, _, cx| {
                         if matches!(event, InputEvent::Change) {
                             let text = state.read(cx).value().to_string();
-                            workspace.update(cx, |this, cx| {
-                                let _ = this.state.set_outline_field(
-                                    &field_key,
-                                    text,
-                                    Utc::now(),
-                                    monotonic_ms(),
-                                );
-                                this.schedule_debounced_save(cx);
-                                cx.notify();
-                            });
+                            let _ = this.state.set_outline_field(
+                                &field_key,
+                                text,
+                                Utc::now(),
+                                monotonic_ms(),
+                            );
+                            this.schedule_debounced_save(cx);
+                            cx.notify();
                         }
                     }
                 }));
@@ -220,24 +229,26 @@ impl Workspace {
                 .placeholder("条目名称")
                 .default_value("未命名")
         });
-        // 分类用循环选择：默认角色；在对话框中用按钮切换较复杂，简化为输入分类名
-        let category_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("分类：角色/背景/场景/事件/杂项")
-                .default_value("角色")
-        });
+        let category_labels: Vec<SharedString> = OutlineCategory::all()
+            .into_iter()
+            .map(|c| SharedString::from(c.label()))
+            .collect();
+        let category_select =
+            cx.new(|cx| SelectState::new(category_labels, Some(IndexPath::default()), window, cx));
         let workspace = cx.entity();
         window.open_dialog(cx, move |dialog, _, _| {
             let name_input = name_input.clone();
-            let category_input = category_input.clone();
+            let category_select = category_select.clone();
             let workspace = workspace.clone();
             dialog
                 .title("新建大纲条目")
                 .child(
                     v_flex()
                         .gap_2()
+                        .child(div().text_sm().child("名称"))
                         .child(Input::new(&name_input))
-                        .child(Input::new(&category_input)),
+                        .child(div().text_sm().child("分类"))
+                        .child(Select::new(&category_select).placeholder("选择分类")),
                 )
                 .button_props(
                     DialogButtonProps::default()
@@ -246,8 +257,11 @@ impl Workspace {
                         .cancel_text("取消")
                         .on_ok(move |_, window, cx| {
                             let name = name_input.read(cx).value().to_string();
-                            let cat = category_input.read(cx).value().to_string();
-                            let category = parse_outline_category(cat.trim());
+                            let category = category_select
+                                .read(cx)
+                                .selected_value()
+                                .map(|s| parse_outline_category(s.as_ref()))
+                                .unwrap_or(OutlineCategory::Character);
                             if let Err(err) = workspace.update(cx, |this, cx| {
                                 this.state
                                     .create_outline(name.trim(), category, Utc::now())?;
@@ -608,7 +622,7 @@ impl Workspace {
             return;
         };
         let content = block.content.clone();
-        let is_dialogue = block.block_type == BlockType::Dialogue;
+        let is_speaker_block = block.block_type.allows_speaker();
         let speaker = block.speaker.clone().unwrap_or_default();
 
         let input = cx.new(|cx| {
@@ -616,94 +630,84 @@ impl Workspace {
                 .auto_grow(2, 20)
                 .placeholder("输入正文…")
                 .default_value(content)
+                .submit_on_enter(true)
         });
 
         let mut subs = Vec::new();
-        let workspace = cx.entity();
+        // subscribe_in already provides &mut Workspace — do not nest workspace.update().
         subs.push(cx.subscribe_in(&input, window, {
-            let workspace = workspace.clone();
-            move |_this, state, event, window, cx| match event {
+            move |this, state, event, window, cx| match event {
                 InputEvent::Change => {
                     let text = state.read(cx).value().to_string();
-                    workspace.update(cx, |this, cx| {
-                        let index = match this.state.block_focus {
-                            BlockFocus::Editing { index } => index,
-                            _ => return,
-                        };
-                        let _ = this.state.set_block_content_at(
-                            index,
-                            text,
-                            Utc::now(),
-                            monotonic_ms(),
-                        );
-                        this.schedule_debounced_save(cx);
-                        cx.notify();
-                    });
+                    let index = match this.state.block_focus {
+                        BlockFocus::Editing { index } => index,
+                        _ => return,
+                    };
+                    let _ =
+                        this.state
+                            .set_block_content_at(index, text, Utc::now(), monotonic_ms());
+                    this.schedule_debounced_save(cx);
+                    cx.notify();
                 }
                 InputEvent::PressEnter { shift, .. } => {
                     if *shift {
                         return;
                     }
                     let cursor = state.read(cx).cursor();
-                    workspace.update(cx, |this, cx| {
-                        let index = match this.state.block_focus {
-                            BlockFocus::Editing { index } => index,
-                            _ => return,
-                        };
-                        let text = this
-                            .editing_input
-                            .as_ref()
-                            .map(|(_, e)| e.read(cx).value().to_string())
-                            .unwrap_or_default();
-                        let _ = this.state.set_block_content_at(
-                            index,
-                            text,
-                            Utc::now(),
-                            monotonic_ms(),
-                        );
-                        if let Err(err) =
-                            this.state.split_block_at_cursor(index, cursor, Utc::now())
-                        {
-                            eprintln!("split failed: {err:#}");
-                        }
-                        this.invalidate_editor_inputs();
-                        this.ensure_editing_input(window, cx);
-                        cx.notify();
-                    });
+                    let index = match this.state.block_focus {
+                        BlockFocus::Editing { index } => index,
+                        _ => return,
+                    };
+                    let text = this
+                        .editing_input
+                        .as_ref()
+                        .map(|(_, e)| e.read(cx).value().to_string())
+                        .unwrap_or_default();
+                    let _ =
+                        this.state
+                            .set_block_content_at(index, text, Utc::now(), monotonic_ms());
+                    if let Err(err) = this.state.split_block_at_cursor(index, cursor, Utc::now()) {
+                        eprintln!("split failed: {err:#}");
+                    }
+                    this.invalidate_editor_inputs();
+                    this.ensure_editing_input(window, cx);
+                    cx.notify();
                 }
                 InputEvent::Blur => {}
                 _ => {}
             }
         }));
 
-        if is_dialogue {
+        if is_speaker_block {
+            let placeholder = if block.block_type == BlockType::Thought {
+                "人物"
+            } else {
+                "说话人"
+            };
             let speaker_input = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("说话人")
+                    .placeholder(placeholder)
                     .default_value(speaker)
             });
             subs.push(cx.subscribe_in(&speaker_input, window, {
-                let workspace = workspace.clone();
-                move |_this, state, event, _, cx| {
+                move |this, state, event, _, cx| {
                     if matches!(event, InputEvent::Change) {
                         let text = state.read(cx).value().to_string();
-                        workspace.update(cx, |this, cx| {
-                            let index = match this.state.block_focus {
-                                BlockFocus::Editing { index } => index,
-                                _ => return,
-                            };
-                            let speaker = {
-                                let t = text.trim();
-                                if t.is_empty() {
-                                    None
-                                } else {
-                                    Some(t.to_string())
-                                }
-                            };
-                            let _ = this.state.set_block_speaker_at(index, speaker, Utc::now());
-                            this.schedule_debounced_save(cx);
-                            cx.notify();
-                        });
+                        let index = match this.state.block_focus {
+                            BlockFocus::Editing { index } => index,
+                            _ => return,
+                        };
+                        let speaker = {
+                            let t = text.trim();
+                            if t.is_empty() {
+                                None
+                            } else {
+                                Some(t.to_string())
+                            }
+                        };
+                        let _ = this.state.set_block_speaker_at(index, speaker, Utc::now());
+                        this.schedule_debounced_save(cx);
+                        cx.notify();
                     }
                 }
             }));
@@ -712,8 +716,166 @@ impl Workspace {
             self.speaker_input = None;
         }
 
-        self.editing_input = Some((index, input));
+        self.editing_input = Some((index, input.clone()));
         self._edit_subscriptions = subs;
+
+        input.update(cx, |state, cx| {
+            let end = state.text().len();
+            let position = state.text().offset_to_position(end);
+            state.set_cursor_position(position, window, cx);
+        });
+    }
+
+    pub(crate) fn ensure_script_editing_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ScriptFocus::Editing { index } = self.state.script_focus else {
+            return;
+        };
+        if self
+            .editing_input
+            .as_ref()
+            .is_some_and(|(i, _)| *i == index)
+        {
+            return;
+        }
+
+        let Some(script) = self.state.current_script.as_ref() else {
+            return;
+        };
+        let Some(block) = script.blocks.get(index) else {
+            return;
+        };
+        let content = block.content.clone();
+        let allows_character = block.block_type.allows_character();
+        let character = block.character.clone().unwrap_or_default();
+
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 20)
+                .placeholder("输入正文…")
+                .default_value(content)
+                .submit_on_enter(true)
+        });
+
+        let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(&input, window, {
+            move |this, state, event, window, cx| match event {
+                InputEvent::Change => {
+                    let text = state.read(cx).value().to_string();
+                    let index = match this.state.script_focus {
+                        ScriptFocus::Editing { index } => index,
+                        _ => return,
+                    };
+                    let _ = this.state.set_script_block_content_at(
+                        index,
+                        text,
+                        Utc::now(),
+                        monotonic_ms(),
+                    );
+                    this.schedule_debounced_save(cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift, .. } => {
+                    if *shift {
+                        return;
+                    }
+                    let cursor = state.read(cx).cursor();
+                    let index = match this.state.script_focus {
+                        ScriptFocus::Editing { index } => index,
+                        _ => return,
+                    };
+                    let text = this
+                        .editing_input
+                        .as_ref()
+                        .map(|(_, e)| e.read(cx).value().to_string())
+                        .unwrap_or_default();
+                    let _ = this.state.set_script_block_content_at(
+                        index,
+                        text,
+                        Utc::now(),
+                        monotonic_ms(),
+                    );
+                    if let Err(err) =
+                        this.state.split_script_block_at_cursor(index, cursor, Utc::now())
+                    {
+                        eprintln!("split script block failed: {err:#}");
+                    }
+                    this.invalidate_script_editor_inputs();
+                    this.ensure_script_editing_input(window, cx);
+                    cx.notify();
+                }
+                InputEvent::Blur => {}
+                _ => {}
+            }
+        }));
+
+        if allows_character {
+            let character_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("角色")
+                    .default_value(character)
+            });
+            subs.push(cx.subscribe_in(&character_input, window, {
+                move |this, state, event, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let text = state.read(cx).value().to_string();
+                        let index = match this.state.script_focus {
+                            ScriptFocus::Editing { index } => index,
+                            _ => return,
+                        };
+                        let character = {
+                            let t = text.trim();
+                            if t.is_empty() {
+                                None
+                            } else {
+                                Some(t.to_string())
+                            }
+                        };
+                        let _ = this
+                            .state
+                            .set_script_character_at(index, character, Utc::now());
+                        this.schedule_debounced_save(cx);
+                        cx.notify();
+                    }
+                }
+            }));
+            self.character_input = Some((index, character_input));
+        } else {
+            self.character_input = None;
+        }
+
+        self.editing_input = Some((index, input.clone()));
+        self._edit_subscriptions = subs;
+
+        input.update(cx, |state, cx| {
+            let end = state.text().len();
+            let position = state.text().offset_to_position(end);
+            state.set_cursor_position(position, window, cx);
+        });
+    }
+
+    pub(crate) fn confirm_delete_script_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.state.script_focus.selected_index() else {
+            return;
+        };
+        let workspace = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let workspace = workspace.clone();
+            alert
+                .title("确认删除剧本块")
+                .description(format!("确定删除第 {} 个剧本块？", index + 1))
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    if let Err(err) = workspace.update(cx, |this, cx| {
+                        this.state.delete_script_block_at(index, Utc::now())?;
+                        this.invalidate_script_editor_inputs();
+                        cx.notify();
+                        anyhow::Ok(())
+                    }) {
+                        eprintln!("delete script block failed: {err:#}");
+                    }
+                    true
+                })
+        });
     }
 
     fn schedule_debounced_save(&mut self, cx: &mut Context<Self>) {
@@ -749,29 +911,71 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 新建目录的父路径：选中目录则用该目录，选中章节则用其父，否则根。
+    /// 新建目录的父路径：选中目录则用该目录，选中叶子则用其父，否则根。
     fn creation_parent(&self) -> String {
-        match self.state.ui.selected_node.as_deref() {
-            Some(rel) => {
-                if let Some(node) = find_node_by_rel(&self.state.chapter_tree, rel)
-                    && node.kind == ChapterNodeKind::Directory
-                {
-                    return rel.to_string();
+        match self.state.ui.sidebar_tab {
+            SidebarTab::Scripts => match self.state.ui.selected_node.as_deref() {
+                Some(rel) => {
+                    if let Some(node) = find_script_node_by_rel(&self.state.script_tree, rel)
+                        && node.kind == ScriptNodeKind::Directory
+                    {
+                        return rel.to_string();
+                    }
+                    parent_of(rel).to_string()
                 }
-                parent_of(rel).to_string()
-            }
-            None => String::new(),
+                None => String::new(),
+            },
+            _ => match self.state.ui.selected_node.as_deref() {
+                Some(rel) => {
+                    if let Some(node) = find_node_by_rel(&self.state.chapter_tree, rel)
+                        && node.kind == ChapterNodeKind::Directory
+                    {
+                        return rel.to_string();
+                    }
+                    parent_of(rel).to_string()
+                }
+                None => String::new(),
+            },
         }
     }
 
     fn unique_child_name(&self, parent_rel: &str, prefix: &str) -> String {
-        let siblings: &[crate::storage::ChapterTreeNode] = if parent_rel.is_empty() {
-            self.state.chapter_tree.as_slice()
-        } else {
-            find_node_by_rel(&self.state.chapter_tree, parent_rel)
-                .map(|n| n.children.as_slice())
-                .unwrap_or(&[])
-        };
+        match self.state.ui.sidebar_tab {
+            SidebarTab::Scripts => {
+                let siblings: &[crate::storage::ScriptTreeNode] = if parent_rel.is_empty() {
+                    self.state.script_tree.as_slice()
+                } else {
+                    find_script_node_by_rel(&self.state.script_tree, parent_rel)
+                        .map(|n| n.children.as_slice())
+                        .unwrap_or(&[])
+                };
+                Self::unique_name_in(siblings, prefix)
+            }
+            _ => {
+                let siblings: &[crate::storage::ChapterTreeNode] = if parent_rel.is_empty() {
+                    self.state.chapter_tree.as_slice()
+                } else {
+                    find_node_by_rel(&self.state.chapter_tree, parent_rel)
+                        .map(|n| n.children.as_slice())
+                        .unwrap_or(&[])
+                };
+                Self::unique_chapter_name_in(siblings, prefix)
+            }
+        }
+    }
+
+    fn unique_name_in(siblings: &[crate::storage::ScriptTreeNode], prefix: &str) -> String {
+        for i in 1..1000 {
+            let candidate = format!("{prefix}{i:03}");
+            let taken = siblings.iter().any(|c| c.name == candidate);
+            if !taken {
+                return candidate;
+            }
+        }
+        format!("{prefix}{}", Utc::now().timestamp())
+    }
+
+    fn unique_chapter_name_in(siblings: &[crate::storage::ChapterTreeNode], prefix: &str) -> String {
         for i in 1..1000 {
             let candidate = format!("{prefix}{i:03}");
             let taken = siblings.iter().any(|c| c.name == candidate);
@@ -889,13 +1093,77 @@ impl Workspace {
         });
     }
 
+    pub(crate) fn prompt_new_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.project_dir.is_none() {
+            return;
+        }
+        let parent = self.creation_parent();
+        let default = self.unique_child_name(&parent, "sc-");
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("剧本文件名（不含 .json）")
+                .default_value(default)
+        });
+        let title_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("剧本标题")
+                .default_value("未命名剧本")
+        });
+        let workspace = cx.entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let name_input = name_input.clone();
+            let title_input = title_input.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title("新建剧本")
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Input::new(&name_input))
+                        .child(Input::new(&title_input)),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("创建")
+                        .show_cancel(true)
+                        .cancel_text("取消")
+                        .on_ok(move |_, window, cx| {
+                            let name = name_input.read(cx).value().to_string();
+                            let title = title_input.read(cx).value().to_string();
+                            let parent = workspace.read(cx).creation_parent();
+                            if let Err(err) = workspace.update(cx, |this, cx| {
+                                this.state.create_script_under(
+                                    &parent,
+                                    name.trim(),
+                                    title.trim(),
+                                    Utc::now(),
+                                )?;
+                                this.invalidate_script_editor_inputs();
+                                this.sync_title_input(window, cx);
+                                cx.notify();
+                                anyhow::Ok(())
+                            }) {
+                                eprintln!("create script failed: {err:#}");
+                                return false;
+                            }
+                            true
+                        }),
+                )
+        });
+    }
+
     pub(crate) fn prompt_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rel) = self.state.ui.selected_node.clone() else {
             return;
         };
-        let current_name = find_node_by_rel(&self.state.chapter_tree, &rel)
-            .map(|n| n.name.clone())
-            .unwrap_or_default();
+        let current_name = match self.state.ui.sidebar_tab {
+            SidebarTab::Scripts => find_script_node_by_rel(&self.state.script_tree, &rel)
+                .map(|n| n.name.clone())
+                .unwrap_or_default(),
+            _ => find_node_by_rel(&self.state.chapter_tree, &rel)
+                .map(|n| n.name.clone())
+                .unwrap_or_default(),
+        };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("新名称")
@@ -935,9 +1203,14 @@ impl Workspace {
         let Some(rel) = self.state.ui.selected_node.clone() else {
             return;
         };
-        let is_dir = find_node_by_rel(&self.state.chapter_tree, &rel)
-            .map(|n| n.kind == ChapterNodeKind::Directory)
-            .unwrap_or(false);
+        let is_dir = match self.state.ui.sidebar_tab {
+            SidebarTab::Scripts => find_script_node_by_rel(&self.state.script_tree, &rel)
+                .map(|n| n.kind == ScriptNodeKind::Directory)
+                .unwrap_or(false),
+            _ => find_node_by_rel(&self.state.chapter_tree, &rel)
+                .map(|n| n.kind == ChapterNodeKind::Directory)
+                .unwrap_or(false),
+        };
         let nonempty = is_dir && self.state.directory_is_nonempty(&rel).unwrap_or(false);
         let description = if nonempty {
             format!("「{rel}」及其所有后代将被永久删除，此操作不可撤销。")
@@ -958,6 +1231,7 @@ impl Workspace {
                         this.state.delete_at(&rel, Utc::now())?;
                         this.title_input = None;
                         this.invalidate_editor_inputs();
+                        this.invalidate_script_editor_inputs();
                         cx.notify();
                         anyhow::Ok(())
                     }) {
@@ -988,7 +1262,59 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn copy_selected_script(&mut self) {
+        let Some(rel) = self.state.ui.selected_node.clone() else {
+            return;
+        };
+        let Some(node) = find_script_node_by_rel(&self.state.script_tree, &rel).cloned() else {
+            return;
+        };
+        if node.kind != ScriptNodeKind::Script {
+            return;
+        }
+        let parent = parent_of(&rel).to_string();
+        let new_name = format!("{}-副本", node.name);
+        if let Err(err) = self
+            .state
+            .copy_script_at(&rel, &parent, &new_name, Utc::now())
+        {
+            eprintln!("copy script failed: {err:#}");
+        }
+    }
+
     fn sync_title_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(script) = self.state.current_script.as_ref() {
+            let title = script.title.clone();
+            match &self.title_input {
+                Some(input) => {
+                    input.update(cx, |state, cx| {
+                        state.set_value(title, window, cx);
+                    });
+                }
+                None => {
+                    let input = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder("剧本标题")
+                            .default_value(title)
+                    });
+                    self._title_subscription = Some(cx.subscribe_in(&input, window, {
+                        move |this, state, event, _, cx| {
+                            if matches!(event, InputEvent::Change) {
+                                let title = state.read(cx).value().to_string();
+                                if let Some(script) = this.state.current_script.as_mut() {
+                                    script.title = title;
+                                    this.state.dirty = true;
+                                    this.schedule_debounced_save(cx);
+                                }
+                                cx.notify();
+                            }
+                        }
+                    }));
+                    self.title_input = Some(input);
+                }
+            }
+            return;
+        }
         if let Some(chapter) = self.state.current_chapter.as_ref() {
             let title = chapter.title.clone();
             match &self.title_input {
@@ -1003,19 +1329,16 @@ impl Workspace {
                             .placeholder("章节标题")
                             .default_value(title)
                     });
-                    let workspace = cx.entity();
                     self._title_subscription = Some(cx.subscribe_in(&input, window, {
-                        move |_this, state, event, _, cx| {
+                        move |this, state, event, _, cx| {
                             if matches!(event, InputEvent::Change) {
                                 let title = state.read(cx).value().to_string();
-                                workspace.update(cx, |this, cx| {
-                                    if let Some(ch) = this.state.current_chapter.as_mut() {
-                                        ch.title = title;
-                                        this.state.dirty = true;
-                                        this.schedule_debounced_save(cx);
-                                    }
-                                    cx.notify();
-                                });
+                                if let Some(ch) = this.state.current_chapter.as_mut() {
+                                    ch.title = title;
+                                    this.state.dirty = true;
+                                    this.schedule_debounced_save(cx);
+                                }
+                                cx.notify();
                             }
                         }
                     }));
@@ -1028,10 +1351,13 @@ impl Workspace {
     }
 
     pub(crate) fn ensure_title_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.current_script.is_some() && self.title_input.is_none() {
+            self.sync_title_input(window, cx);
+        }
         if self.state.current_chapter.is_some() && self.title_input.is_none() {
             self.sync_title_input(window, cx);
         }
-        if self.state.current_chapter.is_none() {
+        if self.state.current_chapter.is_none() && self.state.current_script.is_none() {
             self.title_input = None;
         }
     }
@@ -1075,21 +1401,41 @@ impl Render for Workspace {
         if matches!(self.state.block_focus, BlockFocus::Editing { .. }) {
             self.ensure_editing_input(window, cx);
         }
+        if matches!(self.state.script_focus, ScriptFocus::Editing { .. }) {
+            self.ensure_script_editing_input(window, cx);
+        }
 
-        let chapter_title = self
+        let editor_title = self
             .state
-            .current_chapter
+            .current_script
             .as_ref()
-            .map(|c| c.title.clone())
+            .map(|s| s.title.clone())
+            .or_else(|| self.state.current_chapter.as_ref().map(|c| c.title.clone()))
             .unwrap_or_else(|| {
                 if self.state.project.is_some() {
-                    "选择一个章节".to_string()
+                    if self.state.ui.sidebar_tab == SidebarTab::Scripts {
+                        "选择一个剧本".to_string()
+                    } else {
+                        "选择一个章节".to_string()
+                    }
                 } else {
-                    "当前章节标题（未打开项目）".to_string()
+                    "当前标题（未打开项目）".to_string()
                 }
             });
 
-        v_flex()
+        // Dialog / notification / sheet overlays live on Root; the first-level
+        // app view must paint these layers or open_dialog / open_alert_dialog
+        // appear to do nothing.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+        let sheet_layer = Root::render_sheet_layer(window, cx);
+
+        div()
+            .id("workspace-root")
+            .size_full()
+            .relative()
+            .child(
+                v_flex()
             .id("workspace")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -1110,6 +1456,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &CopyChapter, _, cx| {
                 this.copy_selected_chapter();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CopyScript, _, cx| {
+                this.copy_selected_script();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
@@ -1134,61 +1484,113 @@ impl Render for Workspace {
                 this.save_document(cx);
             }))
             .on_action(cx.listener(|this, _: &EscapeBlockFocus, _, cx| {
-                this.state.escape_block_focus();
-                if !this.state.block_focus.is_editing() {
-                    this.invalidate_editor_inputs();
+                if this.state.current_script.is_some() {
+                    this.state.escape_script_focus();
+                    if !this.state.script_focus.is_editing() {
+                        this.invalidate_script_editor_inputs();
+                    }
+                } else {
+                    this.state.escape_block_focus();
+                    if !this.state.block_focus.is_editing() {
+                        this.invalidate_editor_inputs();
+                    }
                 }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrevBlock, window, cx| {
-                this.state.move_block_focus(-1);
-                this.invalidate_editor_inputs();
-                if matches!(this.state.block_focus, BlockFocus::Editing { .. }) {
-                    this.ensure_editing_input(window, cx);
+                if this.state.current_script.is_some() {
+                    this.state.move_script_block_focus(-1);
+                    this.invalidate_script_editor_inputs();
+                    if matches!(this.state.script_focus, ScriptFocus::Editing { .. }) {
+                        this.ensure_script_editing_input(window, cx);
+                    }
+                } else {
+                    this.state.move_block_focus(-1);
+                    this.invalidate_editor_inputs();
+                    if matches!(this.state.block_focus, BlockFocus::Editing { .. }) {
+                        this.ensure_editing_input(window, cx);
+                    }
                 }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusNextBlock, window, cx| {
-                this.state.move_block_focus(1);
-                this.invalidate_editor_inputs();
-                if matches!(this.state.block_focus, BlockFocus::Editing { .. }) {
-                    this.ensure_editing_input(window, cx);
+                if this.state.current_script.is_some() {
+                    this.state.move_script_block_focus(1);
+                    this.invalidate_script_editor_inputs();
+                    if matches!(this.state.script_focus, ScriptFocus::Editing { .. }) {
+                        this.ensure_script_editing_input(window, cx);
+                    }
+                } else {
+                    this.state.move_block_focus(1);
+                    this.invalidate_editor_inputs();
+                    if matches!(this.state.block_focus, BlockFocus::Editing { .. }) {
+                        this.ensure_editing_input(window, cx);
+                    }
                 }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &DeleteFocusedBlock, window, cx| {
-                this.confirm_delete_block(window, cx);
+                if this.state.current_script.is_some() {
+                    this.confirm_delete_script_block(window, cx);
+                } else {
+                    this.confirm_delete_block(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &MergeSelectedBlocks, _, cx| {
-                if let Err(err) = this.state.merge_selected_blocks(Utc::now()) {
+                if this.state.current_script.is_some() {
+                    if let Err(err) = this.state.merge_selected_script_blocks(Utc::now()) {
+                        eprintln!("merge failed: {err:#}");
+                    }
+                    this.invalidate_script_editor_inputs();
+                } else if let Err(err) = this.state.merge_selected_blocks(Utc::now()) {
                     eprintln!("merge failed: {err:#}");
+                    this.invalidate_editor_inputs();
                 }
-                this.invalidate_editor_inputs();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &MoveFocusedBlockUp, _, cx| {
-                if let Some(i) = this.state.block_focus.selected_index()
+                if this.state.current_script.is_some() {
+                    if let Some(i) = this.state.script_focus.selected_index()
+                        && let Err(err) = this.state.swap_script_block_at(i, true, Utc::now())
+                    {
+                        eprintln!("swap up failed: {err:#}");
+                    }
+                    this.invalidate_script_editor_inputs();
+                } else if let Some(i) = this.state.block_focus.selected_index()
                     && let Err(err) = this.state.swap_block_at(i, true, Utc::now())
                 {
                     eprintln!("swap up failed: {err:#}");
+                    this.invalidate_editor_inputs();
                 }
-                this.invalidate_editor_inputs();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &MoveFocusedBlockDown, _, cx| {
-                if let Some(i) = this.state.block_focus.selected_index()
+                if this.state.current_script.is_some() {
+                    if let Some(i) = this.state.script_focus.selected_index()
+                        && let Err(err) = this.state.swap_script_block_at(i, false, Utc::now())
+                    {
+                        eprintln!("swap down failed: {err:#}");
+                    }
+                    this.invalidate_script_editor_inputs();
+                } else if let Some(i) = this.state.block_focus.selected_index()
                     && let Err(err) = this.state.swap_block_at(i, false, Utc::now())
                 {
                     eprintln!("swap down failed: {err:#}");
+                    this.invalidate_editor_inputs();
                 }
-                this.invalidate_editor_inputs();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SetTypeNarration, _, cx| {
                 this.set_focused_block_type(BlockType::Narration, cx);
             }))
+            .on_action(cx.listener(|this, _: &SetTypeAside, _, cx| {
+                this.set_focused_block_type(BlockType::Aside, cx);
+            }))
             .on_action(cx.listener(|this, _: &SetTypeDialogue, _, cx| {
                 this.set_focused_block_type(BlockType::Dialogue, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SetTypeThought, _, cx| {
+                this.set_focused_block_type(BlockType::Thought, cx);
             }))
             .on_action(cx.listener(|this, _: &SetTypeSceneBreak, _, cx| {
                 this.set_focused_block_type(BlockType::SceneBreak, cx);
@@ -1250,7 +1652,17 @@ impl Render for Workspace {
                             .child(resizable_panel().child(if self.state.current_outline.is_some() {
                                 editor::render_outline_form(self, window, cx).into_any_element()
                             } else {
-                                v_flex()
+                                let has_doc = self.state.current_chapter.is_some()
+                                    || self.state.current_script.is_some();
+                                let preview_open =
+                                    self.state.ui.preview_panel_open && has_doc;
+                                let preview_label = if self.state.ui.preview_panel_open {
+                                    "隐藏预览"
+                                } else {
+                                    "预览"
+                                };
+
+                                let editor_core = v_flex()
                                     .id("editor-pane")
                                     .size_full()
                                     .p_4()
@@ -1264,7 +1676,7 @@ impl Render for Workspace {
                                         div()
                                             .text_lg()
                                             .font_bold()
-                                            .child(chapter_title)
+                                            .child(editor_title)
                                             .into_any_element()
                                     })
                                     .child(
@@ -1276,6 +1688,7 @@ impl Render for Workspace {
                                                     .label("保存")
                                                     .disabled(
                                                         self.state.current_chapter.is_none()
+                                                            && self.state.current_script.is_none()
                                                             && self.state.current_outline.is_none(),
                                                     )
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1283,17 +1696,52 @@ impl Render for Workspace {
                                                     })),
                                             )
                                             .child(
+                                                Button::new("toggle-preview")
+                                                    .small()
+                                                    .label(preview_label)
+                                                    .disabled(!has_doc)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.state.toggle_preview_panel();
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
                                                 div()
                                                     .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
                                                     .child(
-                                                        // CONCERNS: 块排序使用上移/下移按钮代替拖拽
-                                                        "提示：块排序请用上移/下移；Cmd/Ctrl+S 保存",
+                                                        "提示：Enter 分割 · Shift+Enter 块内换行 · Cmd/Ctrl+S 保存",
                                                     ),
                                             ),
                                     )
-                                    .child(editor::render_block_list(self, window, cx))
-                                    .into_any_element()
+                                    .child(if self.state.current_script.is_some() {
+                                        editor::render_script_list(self, window, cx)
+                                            .into_any_element()
+                                    } else {
+                                        editor::render_block_list(self, window, cx).into_any_element()
+                                    });
+
+                                if preview_open {
+                                    div()
+                                        .size_full()
+                                        .child(
+                                            h_resizable("editor-with-preview")
+                                                .child(
+                                                    resizable_panel().child(editor_core),
+                                                )
+                                                .child(
+                                                    resizable_panel()
+                                                        .size(px(300.))
+                                                        .size_range(px(200.)..px(480.))
+                                                        .child(editor::render_preview_panel(
+                                                            self, window, cx,
+                                                        )),
+                                                ),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    editor_core.into_any_element()
+                                }
                             }))
                             .child(
                                 resizable_panel()
@@ -1304,6 +1752,10 @@ impl Render for Workspace {
                             ),
                     ),
             )
-            .child(status_bar::render_status_bar(&self.state, cx))
+            .child(status_bar::render_status_bar(&self.state, cx)),
+            )
+            .children(dialog_layer)
+            .children(sheet_layer)
+            .children(notification_layer)
     }
 }

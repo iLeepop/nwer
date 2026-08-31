@@ -56,7 +56,7 @@ impl Chapter {
         Ok(self.blocks.remove(index))
     }
 
-    /// 切换块类型；非 dialogue 清除 speaker。
+    /// 切换块类型；非 dialogue/thought 清除 speaker。
     pub fn set_block_type(
         &mut self,
         index: usize,
@@ -68,14 +68,14 @@ impl Chapter {
             .get_mut(index)
             .ok_or_else(|| anyhow::anyhow!("block index out of range"))?;
         block.block_type = new_type;
-        if new_type != BlockType::Dialogue {
+        if !new_type.allows_speaker() {
             block.speaker = None;
         }
         block.meta.updated_at = now;
         Ok(())
     }
 
-    /// 设置 dialogue 的 speaker（非 dialogue 报错）。
+    /// 设置 dialogue / thought 的 speaker（其他类型报错）。
     pub fn set_speaker(
         &mut self,
         index: usize,
@@ -87,8 +87,8 @@ impl Chapter {
             .get_mut(index)
             .ok_or_else(|| anyhow::anyhow!("block index out of range"))?;
         ensure!(
-            block.block_type == BlockType::Dialogue,
-            "speaker only valid on dialogue blocks"
+            block.block_type.allows_speaker(),
+            "speaker only valid on dialogue or thought blocks"
         );
         block.speaker = speaker;
         block.meta.updated_at = now;
@@ -138,7 +138,7 @@ impl Chapter {
     ///
     /// - 不允许包含 `scene_break`
     /// - 类型取首块；正文换行连接
-    /// - 首块非 dialogue 则清 speaker，否则保留首块 speaker
+    /// - 首块为 dialogue/thought 则保留 speaker，否则清除
     pub fn merge_blocks(&mut self, start: usize, end: usize, now: DateTime<Utc>) -> Result<()> {
         ensure!(end < self.blocks.len(), "merge end out of range");
         ensure!(end > start, "merge requires at least two blocks");
@@ -149,7 +149,7 @@ impl Chapter {
         }
 
         let first_type = self.blocks[start].block_type;
-        let speaker = if first_type == BlockType::Dialogue {
+        let speaker = if first_type.allows_speaker() {
             self.blocks[start].speaker.clone()
         } else {
             None
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn set_block_type_clears_speaker_unless_dialogue() {
+    fn set_block_type_clears_speaker_unless_allows_speaker() {
         let mut ch = chapter_with(vec![Block::new_dialogue("话", "甲", now())]);
         ch.set_block_type(0, BlockType::Narration, now()).unwrap();
         assert_eq!(ch.blocks[0].block_type, BlockType::Narration);
@@ -247,6 +247,26 @@ mod tests {
         ch.set_block_type(0, BlockType::Dialogue, now()).unwrap();
         ch.set_speaker(0, Some("乙".into()), now()).unwrap();
         assert_eq!(ch.blocks[0].speaker.as_deref(), Some("乙"));
+
+        ch.set_block_type(0, BlockType::Thought, now()).unwrap();
+        ch.set_speaker(0, Some("丙".into()), now()).unwrap();
+        assert_eq!(ch.blocks[0].block_type, BlockType::Thought);
+        assert_eq!(ch.blocks[0].speaker.as_deref(), Some("丙"));
+
+        ch.set_block_type(0, BlockType::Aside, now()).unwrap();
+        assert!(ch.blocks[0].speaker.is_none());
+    }
+
+    #[test]
+    fn merge_thought_first_keeps_speaker() {
+        let mut ch = chapter_with(vec![
+            Block::new_thought("心想", "甲", now()),
+            Block::new(BlockType::Aside, "旁白", now()),
+        ]);
+        ch.merge_blocks(0, 1, now()).unwrap();
+        assert_eq!(ch.blocks[0].block_type, BlockType::Thought);
+        assert_eq!(ch.blocks[0].speaker.as_deref(), Some("甲"));
+        assert_eq!(ch.blocks[0].content, "心想\n旁白");
     }
 
     #[test]
