@@ -34,7 +34,7 @@ use crate::ui::sidebar::chapter_tree::{
 };
 use crate::ui::sidebar::script_tree::CopyScript;
 use crate::ui::sidebar::outline_tree::{DeleteOutlineEntry, NewOutlineEntry, RenameOutlineEntry};
-use crate::ui::{ai_panel, editor, sidebar, status_bar, top_bar};
+use crate::ui::{ai_panel, dialog_ok_cancel_footer, editor, sidebar, status_bar, top_bar};
 use std::collections::HashMap;
 
 pub struct Workspace {
@@ -176,6 +176,12 @@ impl Workspace {
         let settings = self.state.ai_settings().clone();
         let lean = crate::ai::lean_context_from_app(&self.state);
         let shared = crate::ai::hydrate_shared_ctx(&self.state);
+        let max_tokens = crate::ai::resolve_max_tokens(
+            self.state.ai.max_token_tier,
+            &settings.provider,
+        );
+        let max_tool_rounds =
+            crate::storage::clamp_max_tool_rounds(settings.max_tool_rounds);
 
         self.state.ai_push_user_message(&text);
         self.state.ai_mark_busy(true);
@@ -196,16 +202,24 @@ impl Workspace {
                             let llm = crate::ai::build_llm(&settings)?;
                             let mut host =
                                 crate::ai::AiSessionHost::from_llm(llm, shared, lean);
-                            let reply =
-                                host.run(crate::ai::AiAction::Chat, &text).await?;
-                            let proposals = {
+                            let reply = host
+                                .run(
+                                    crate::ai::AiAction::Chat,
+                                    &text,
+                                    max_tokens,
+                                    max_tool_rounds,
+                                )
+                                .await?;
+                            let (proposals, ui_commands) = {
                                 let mut guard = host
                                     .ctx
                                     .lock()
                                     .map_err(|_| anyhow::anyhow!("ai ctx poisoned"))?;
-                                std::mem::take(&mut guard.proposals)
+                                let proposals = std::mem::take(&mut guard.proposals);
+                                let ui_commands = guard.take_ui_commands();
+                                (proposals, ui_commands)
                             };
-                            anyhow::Ok((reply, proposals))
+                            anyhow::Ok((reply, proposals, ui_commands))
                         })
                     })
                     .join()
@@ -215,11 +229,13 @@ impl Workspace {
 
             this.update(cx, |this, cx| {
                 match run_result {
-                    Ok((reply, proposals)) => {
-                        if let Err(err) =
-                            this.state
-                                .ai_ingest_host_result(reply, proposals, Utc::now())
-                        {
+                    Ok((reply, proposals, ui_commands)) => {
+                        if let Err(err) = this.state.ai_ingest_host_result(
+                            reply,
+                            proposals,
+                            ui_commands,
+                            Utc::now(),
+                        ) {
                             this.state.ai_fail_run(err);
                         }
                     }
@@ -344,6 +360,7 @@ impl Workspace {
                         .child(div().text_sm().child("分类"))
                         .child(Select::new(&category_select).placeholder("选择分类")),
                 )
+                .footer(dialog_ok_cancel_footer("创建", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("创建")
@@ -392,6 +409,7 @@ impl Workspace {
             dialog
                 .title("重命名大纲条目")
                 .child(Input::new(&input))
+                .footer(dialog_ok_cancel_footer("确定", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("确定")
@@ -458,6 +476,7 @@ impl Workspace {
             dialog
                 .title("添加字段")
                 .child(Input::new(&input))
+                .footer(dialog_ok_cancel_footer("添加", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("添加")
@@ -494,6 +513,7 @@ impl Workspace {
             dialog
                 .title("新建项目")
                 .child(Input::new(&input))
+                .footer(dialog_ok_cancel_footer("创建", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("创建")
@@ -563,6 +583,7 @@ impl Workspace {
                         .child(div().text_sm().child(description))
                         .child(Input::new(&input)),
                 )
+                .footer(dialog_ok_cancel_footer("打开", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("打开")
@@ -1062,6 +1083,7 @@ impl Workspace {
             dialog
                 .title("新建目录")
                 .child(Input::new(&input))
+                .footer(dialog_ok_cancel_footer("创建", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("创建")
@@ -1121,6 +1143,7 @@ impl Workspace {
                         .child(Input::new(&name_input))
                         .child(Input::new(&title_input)),
                 )
+                .footer(dialog_ok_cancel_footer("创建", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("创建")
@@ -1180,6 +1203,7 @@ impl Workspace {
                         .child(Input::new(&name_input))
                         .child(Input::new(&title_input)),
                 )
+                .footer(dialog_ok_cancel_footer("创建", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("创建")
@@ -1235,6 +1259,7 @@ impl Workspace {
             dialog
                 .title("重命名")
                 .child(Input::new(&input))
+                .footer(dialog_ok_cancel_footer("确定", "取消"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("确定")

@@ -22,6 +22,7 @@ pub use outline_store::{
 pub use path_validation::validate_storage_name;
 pub use project_store::{
     AiSettings, AppConfig, RecentProject, RuleViolation, add_recent_project, ai_providers,
+    clamp_max_tool_rounds, default_max_tool_rounds,
     check_can_create_chapter, check_can_create_directory, config_path, create_project,
     default_base_url_for_provider, load_config, load_config_from, load_project,
     remove_recent_project, save_config, save_config_to, save_project, validate_settings_save,

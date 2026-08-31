@@ -64,6 +64,18 @@ pub struct AiSettings {
     pub base_url: String,
     /// 自由文本模型 id
     pub model: String,
+    /// 单次对话允许的工具循环轮次（每轮：模型调用工具 → 执行 → 再推理）。
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: u32,
+}
+
+pub fn default_max_tool_rounds() -> u32 {
+    24
+}
+
+/// 合法范围 [1, 64]。
+pub fn clamp_max_tool_rounds(n: u32) -> u32 {
+    n.clamp(1, 64)
 }
 
 impl Default for AiSettings {
@@ -74,6 +86,7 @@ impl Default for AiSettings {
             base_url: default_base_url_for_provider("deepseek")
                 .unwrap_or_else(|| "https://api.deepseek.com".into()),
             model: String::new(),
+            max_tool_rounds: default_max_tool_rounds(),
         }
     }
 }
@@ -607,10 +620,30 @@ mod tests {
             api_key: "sk-test".into(),
             base_url: "https://api.moonshot.cn/v1".into(),
             model: "moonshot-v1".into(),
+            max_tool_rounds: 32,
         };
         let json = serde_json::to_string(&ai).unwrap();
         let back: AiSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ai);
+    }
+
+    #[test]
+    fn legacy_ai_settings_without_max_tool_rounds_defaults() {
+        let json = r#"{
+            "provider": "deepseek",
+            "api_key": "",
+            "base_url": "https://api.deepseek.com",
+            "model": ""
+        }"#;
+        let ai: AiSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(ai.max_tool_rounds, default_max_tool_rounds());
+    }
+
+    #[test]
+    fn clamp_max_tool_rounds_bounds() {
+        assert_eq!(clamp_max_tool_rounds(0), 1);
+        assert_eq!(clamp_max_tool_rounds(8), 8);
+        assert_eq!(clamp_max_tool_rounds(100), 64);
     }
 
     #[test]

@@ -8,10 +8,13 @@ use gpui_component::{
     select::Select, select::SelectEvent, select::SelectState, v_flex,
 };
 
+use crate::ui::dialog_ok_cancel_footer;
+
 use chrono::Utc;
 
 use crate::storage::{
-    AiSettings, ai_providers, default_base_url_for_provider, validate_settings_save,
+    AiSettings, ai_providers, clamp_max_tool_rounds, default_base_url_for_provider,
+    validate_settings_save,
 };
 use crate::ui::Workspace;
 
@@ -30,6 +33,7 @@ pub(crate) struct SettingsView {
     api_key_input: Entity<InputState>,
     base_url_input: Entity<InputState>,
     model_input: Entity<InputState>,
+    max_tool_rounds_input: Entity<InputState>,
     has_project: bool,
     _provider_sub: Option<Subscription>,
 }
@@ -87,6 +91,11 @@ impl SettingsView {
                 .placeholder("模型 id")
                 .default_value(ai.model.clone())
         });
+        let max_tool_rounds_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("工具循环轮次 1–64")
+                .default_value(ai.max_tool_rounds.to_string())
+        });
 
         let mut view = Self {
             tab: SettingsTab::General,
@@ -96,6 +105,7 @@ impl SettingsView {
             api_key_input,
             base_url_input: base_url_input.clone(),
             model_input,
+            max_tool_rounds_input,
             has_project,
             _provider_sub: None,
         };
@@ -138,11 +148,18 @@ impl SettingsView {
             .find(|(_, name)| *name == label.as_str())
             .map(|(id, _)| (*id).to_string())
             .unwrap_or_else(|| "deepseek".into());
+        let rounds_raw = self.max_tool_rounds_input.read(cx).value().to_string();
+        let max_tool_rounds = rounds_raw
+            .trim()
+            .parse::<u32>()
+            .map(clamp_max_tool_rounds)
+            .unwrap_or_else(|_| crate::storage::default_max_tool_rounds());
         AiSettings {
             provider,
             api_key: self.api_key_input.read(cx).value().to_string(),
             base_url: self.base_url_input.read(cx).value().to_string(),
             model: self.model_input.read(cx).value().to_string(),
+            max_tool_rounds,
         }
     }
 
@@ -196,6 +213,14 @@ impl Render for SettingsView {
                 .child(Input::new(&self.base_url_input))
                 .child(div().text_sm().child("模型"))
                 .child(Input::new(&self.model_input))
+                .child(div().text_sm().child("工具循环轮次 (max_tool_rounds)"))
+                .child(Input::new(&self.max_tool_rounds_input))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("单次对话最多工具轮次，范围 1–64，默认 24"),
+                )
                 .into_any_element(),
         };
 
@@ -240,11 +265,9 @@ pub(crate) fn open_settings_dialog(
             .title("设置")
             .w(px(720.))
             .child(settings.clone())
+            .footer(dialog_ok_cancel_footer("保存", "取消"))
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text("保存")
-                    .show_cancel(true)
-                    .cancel_text("取消")
                     .on_ok(move |_, _, cx| {
                         let root = settings.read(cx).root_input.read(cx).value().to_string();
                         let depth = settings.read(cx).depth_input.read(cx).value().to_string();

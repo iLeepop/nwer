@@ -17,6 +17,11 @@ struct ScriptIdArgs {
     script_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+struct OutlineIdArgs {
+    id: Uuid,
+}
+
 pub fn build_read_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
     {
         let ctx = ctx.clone();
@@ -61,9 +66,51 @@ pub fn build_read_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                         .mutator
                         .list_chapters()
                         .into_iter()
-                        .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
+                        .map(|(id, title)| {
+                            let rel = guard.mutator.chapter_rel(id).unwrap_or("");
+                            serde_json::json!({ "id": id, "title": title, "rel_path": rel })
+                        })
                         .collect();
                     Ok(serde_json::json!({ "chapters": chapters }))
+                }
+            },
+        );
+    }
+
+    {
+        let ctx = ctx.clone();
+        reg.register(
+            "list_chapter_tree",
+            "列出章节树：目录与文件的相对路径（相对 chapters/）",
+            ToolParameters::new(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            })),
+            move |_: EmptyArgs| {
+                let ctx = ctx.clone();
+                async move {
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    let dirs: Vec<_> = guard
+                        .mutator
+                        .list_dirs()
+                        .into_iter()
+                        .map(|rel| serde_json::json!({ "kind": "directory", "rel_path": rel }))
+                        .collect();
+                    let chapters: Vec<_> = guard
+                        .mutator
+                        .list_chapters()
+                        .into_iter()
+                        .map(|(id, title)| {
+                            serde_json::json!({
+                                "kind": "chapter",
+                                "id": id,
+                                "title": title,
+                                "rel_path": guard.mutator.chapter_rel(id).unwrap_or(""),
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::json!({ "dirs": dirs, "chapters": chapters }))
                 }
             },
         );
@@ -87,9 +134,51 @@ pub fn build_read_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                         .mutator
                         .list_scripts()
                         .into_iter()
-                        .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
+                        .map(|(id, title)| {
+                            let rel = guard.mutator.script_rel(id).unwrap_or("");
+                            serde_json::json!({ "id": id, "title": title, "rel_path": rel })
+                        })
                         .collect();
                     Ok(serde_json::json!({ "scripts": scripts }))
+                }
+            },
+        );
+    }
+
+    {
+        let ctx = ctx.clone();
+        reg.register(
+            "list_script_tree",
+            "列出剧本树：目录与文件的相对路径（相对 scripts/）",
+            ToolParameters::new(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            })),
+            move |_: EmptyArgs| {
+                let ctx = ctx.clone();
+                async move {
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    let dirs: Vec<_> = guard
+                        .mutator
+                        .list_script_dirs()
+                        .into_iter()
+                        .map(|rel| serde_json::json!({ "kind": "directory", "rel_path": rel }))
+                        .collect();
+                    let scripts: Vec<_> = guard
+                        .mutator
+                        .list_scripts()
+                        .into_iter()
+                        .map(|(id, title)| {
+                            serde_json::json!({
+                                "kind": "script",
+                                "id": id,
+                                "title": title,
+                                "rel_path": guard.mutator.script_rel(id).unwrap_or(""),
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::json!({ "dirs": dirs, "scripts": scripts }))
                 }
             },
         );
@@ -110,6 +199,36 @@ pub fn build_read_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                 async move {
                     let guard = ctx.lock().map_err(|e| e.to_string())?;
                     Ok(serde_json::json!({ "entries": guard.mutator.get_outline() }))
+                }
+            },
+        );
+    }
+
+    {
+        let ctx = ctx.clone();
+        reg.register(
+            "get_outline_entry",
+            "按 id 获取单个大纲条目",
+            ToolParameters::new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "format": "uuid" },
+                },
+                "required": ["id"],
+            })),
+            move |args: OutlineIdArgs| {
+                let ctx = ctx.clone();
+                async move {
+                    let guard = ctx.lock().map_err(|e| e.to_string())?;
+                    match guard.mutator.get_outline().iter().find(|e| e.id == args.id) {
+                        Some(entry) => {
+                            Ok(serde_json::to_value(entry).map_err(|e| e.to_string())?)
+                        }
+                        None => Ok(serde_json::json!({
+                            "error": "not_found",
+                            "id": args.id,
+                        })),
+                    }
                 }
             },
         );

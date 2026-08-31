@@ -7,10 +7,13 @@ use uuid::Uuid;
 use crate::ai::{AiIntent, ProjectMutator, ScriptBlockUpdateFields};
 use crate::models::{Block, BlockType, Chapter, OutlineCategory, Script};
 use crate::storage::{
-    create_outline_entry, create_script_file, delete_outline_entry, find_node_by_chapter_id,
-    find_node_by_script_id, list_outline_entries, load_chapter, load_project, load_script,
-    outline_entry_path, resolve_rel, resolve_script_rel, save_chapter, save_outline_entry,
-    save_script, scan_chapter_tree, scan_script_tree, validate_storage_name,
+    create_chapter_file, create_directory, create_outline_entry, create_script_directory,
+    create_script_file, delete_node, delete_outline_entry, delete_script_node,
+    find_node_by_chapter_id, find_node_by_script_id, is_nonempty_directory, list_outline_entries,
+    load_chapter, load_project, load_script, move_node, move_script_node, move_script_sibling,
+    move_sibling, outline_entry_path, rename_node, rename_script_node, resolve_rel,
+    resolve_script_rel, save_chapter, save_outline_entry, save_project, save_script,
+    scan_chapter_tree, scan_script_tree, script_dir_nonempty, validate_storage_name, MoveDirection,
 };
 
 /// 将 AiIntent 写入真实项目目录。
@@ -112,6 +115,59 @@ impl WorkspaceMutator {
         save_chapter(&path, &chapter)
     }
 
+    fn apply_update_block(
+        &mut self,
+        chapter_id: Uuid,
+        block_id: Uuid,
+        content: Option<String>,
+        block_type: Option<BlockType>,
+        speaker: Option<String>,
+    ) -> anyhow::Result<()> {
+        let (path, mut chapter) = self.chapter_file(chapter_id)?;
+        let idx = chapter
+            .blocks
+            .iter()
+            .position(|b| b.id == block_id)
+            .with_context(|| format!("block {block_id} not found"))?;
+        if let Some(content) = content {
+            chapter.set_block_content(idx, content, self.now)?;
+        }
+        if let Some(block_type) = block_type {
+            chapter.set_block_type(idx, block_type, self.now)?;
+        }
+        if let Some(speaker) = speaker {
+            chapter.set_speaker(idx, Some(speaker), self.now)?;
+        }
+        save_chapter(&path, &chapter)
+    }
+
+    fn apply_delete_block(&mut self, chapter_id: Uuid, block_id: Uuid) -> anyhow::Result<()> {
+        let (path, mut chapter) = self.chapter_file(chapter_id)?;
+        let idx = chapter
+            .blocks
+            .iter()
+            .position(|b| b.id == block_id)
+            .with_context(|| format!("block {block_id} not found"))?;
+        chapter.remove_block(idx)?;
+        save_chapter(&path, &chapter)
+    }
+
+    fn apply_move_block(
+        &mut self,
+        chapter_id: Uuid,
+        block_id: Uuid,
+        to_index: usize,
+    ) -> anyhow::Result<()> {
+        let (path, mut chapter) = self.chapter_file(chapter_id)?;
+        let from = chapter
+            .blocks
+            .iter()
+            .position(|b| b.id == block_id)
+            .with_context(|| format!("block {block_id} not found"))?;
+        chapter.move_block(from, to_index)?;
+        save_chapter(&path, &chapter)
+    }
+
     fn apply_create_outline_entry(
         &mut self,
         category: OutlineCategory,
@@ -164,11 +220,232 @@ impl WorkspaceMutator {
         Ok(())
     }
 
-    fn apply_create_script(&mut self, title: String) -> anyhow::Result<()> {
-        let script = Script::new(title.clone(), self.now);
-        let name = script_file_stem(&title, script.id);
-        create_script_file(&self.project_dir, "", &name, &script, self.max_depth())?;
+    fn apply_delete_outline_entry(&mut self, id: Uuid) -> anyhow::Result<()> {
+        let entries = list_outline_entries(&self.project_dir)?;
+        let entry = entries
+            .into_iter()
+            .find(|e| e.id == id)
+            .with_context(|| format!("outline entry {id} not found"))?;
+        delete_outline_entry(&self.project_dir, entry.category, &entry.key)
+    }
+
+    fn apply_create_script(
+        &mut self,
+        title: String,
+        parent_rel: String,
+        script_id: Option<Uuid>,
+        name: Option<String>,
+    ) -> anyhow::Result<()> {
+        let mut script = Script::new(title.clone(), self.now);
+        if let Some(id) = script_id {
+            script.id = id;
+        }
+        let stem = match name {
+            Some(n) => {
+                validate_storage_name(&n)?;
+                n
+            }
+            None => script_file_stem(&title, script.id),
+        };
+        create_script_file(
+            &self.project_dir,
+            &parent_rel,
+            &stem,
+            &script,
+            self.max_depth(),
+        )?;
         Ok(())
+    }
+
+    fn apply_create_chapter_directory(
+        &mut self,
+        parent_rel: String,
+        name: String,
+    ) -> anyhow::Result<()> {
+        create_directory(&self.project_dir, &parent_rel, &name, self.max_depth())?;
+        Ok(())
+    }
+
+    fn apply_create_chapter_file(
+        &mut self,
+        chapter_id: Uuid,
+        parent_rel: String,
+        name: String,
+        title: String,
+    ) -> anyhow::Result<()> {
+        let chapter = Chapter {
+            schema_version: 1,
+            id: chapter_id,
+            title,
+            blocks: vec![],
+            meta: Default::default(),
+        };
+        create_chapter_file(
+            &self.project_dir,
+            &parent_rel,
+            &name,
+            &chapter,
+            self.max_depth(),
+        )?;
+        Ok(())
+    }
+
+    fn apply_rename_chapter_node(
+        &mut self,
+        rel_path: String,
+        new_name: String,
+    ) -> anyhow::Result<()> {
+        rename_node(&self.project_dir, &rel_path, &new_name)?;
+        Ok(())
+    }
+
+    fn apply_delete_chapter_node(&mut self, rel_path: String) -> anyhow::Result<()> {
+        if is_nonempty_directory(&self.project_dir, &rel_path)? {
+            bail!("directory is not empty: {rel_path}");
+        }
+        delete_node(&self.project_dir, &rel_path)
+    }
+
+    fn apply_move_chapter_node(
+        &mut self,
+        rel_path: String,
+        dest_parent_rel: String,
+    ) -> anyhow::Result<()> {
+        move_node(
+            &self.project_dir,
+            &rel_path,
+            &dest_parent_rel,
+            None,
+            self.max_depth(),
+        )?;
+        Ok(())
+    }
+
+    fn apply_move_chapter_sibling(
+        &mut self,
+        rel_path: String,
+        direction: i8,
+    ) -> anyhow::Result<()> {
+        let dir = match direction {
+            d if d < 0 => MoveDirection::Up,
+            _ => MoveDirection::Down,
+        };
+        move_sibling(&self.project_dir, &rel_path, dir)?;
+        Ok(())
+    }
+
+    fn apply_copy_chapter(
+        &mut self,
+        src_rel: String,
+        dest_parent_rel: String,
+        new_name: String,
+        new_chapter_id: Uuid,
+    ) -> anyhow::Result<()> {
+        let src = resolve_rel(&self.project_dir, &src_rel)?;
+        let mut chapter = load_chapter(&src)?;
+        chapter.id = new_chapter_id;
+        create_chapter_file(
+            &self.project_dir,
+            &dest_parent_rel,
+            &new_name,
+            &chapter,
+            self.max_depth(),
+        )?;
+        Ok(())
+    }
+
+    fn apply_update_chapter_title(
+        &mut self,
+        chapter_id: Uuid,
+        title: String,
+    ) -> anyhow::Result<()> {
+        let (path, mut chapter) = self.chapter_file(chapter_id)?;
+        chapter.title = title;
+        save_chapter(&path, &chapter)
+    }
+
+    fn apply_create_script_directory(
+        &mut self,
+        parent_rel: String,
+        name: String,
+    ) -> anyhow::Result<()> {
+        create_script_directory(&self.project_dir, &parent_rel, &name, self.max_depth())?;
+        Ok(())
+    }
+
+    fn apply_rename_script_node(
+        &mut self,
+        rel_path: String,
+        new_name: String,
+    ) -> anyhow::Result<()> {
+        rename_script_node(&self.project_dir, &rel_path, &new_name)?;
+        Ok(())
+    }
+
+    fn apply_delete_script_node(&mut self, rel_path: String) -> anyhow::Result<()> {
+        if script_dir_nonempty(&self.project_dir, &rel_path)? {
+            bail!("directory is not empty: {rel_path}");
+        }
+        delete_script_node(&self.project_dir, &rel_path)
+    }
+
+    fn apply_move_script_node(
+        &mut self,
+        rel_path: String,
+        dest_parent_rel: String,
+    ) -> anyhow::Result<()> {
+        move_script_node(
+            &self.project_dir,
+            &rel_path,
+            &dest_parent_rel,
+            None,
+            self.max_depth(),
+        )?;
+        Ok(())
+    }
+
+    fn apply_move_script_sibling(
+        &mut self,
+        rel_path: String,
+        direction: i8,
+    ) -> anyhow::Result<()> {
+        let dir = match direction {
+            d if d < 0 => MoveDirection::Up,
+            _ => MoveDirection::Down,
+        };
+        move_script_sibling(&self.project_dir, &rel_path, dir)?;
+        Ok(())
+    }
+
+    fn apply_copy_script(
+        &mut self,
+        src_rel: String,
+        dest_parent_rel: String,
+        new_name: String,
+        new_script_id: Uuid,
+    ) -> anyhow::Result<()> {
+        let src = resolve_script_rel(&self.project_dir, &src_rel)?;
+        let mut script = load_script(&src)?;
+        script.id = new_script_id;
+        create_script_file(
+            &self.project_dir,
+            &dest_parent_rel,
+            &new_name,
+            &script,
+            self.max_depth(),
+        )?;
+        Ok(())
+    }
+
+    fn apply_update_script_title(
+        &mut self,
+        script_id: Uuid,
+        title: String,
+    ) -> anyhow::Result<()> {
+        let (path, mut script) = self.script_file(script_id)?;
+        script.title = title;
+        script.meta.updated_at = self.now;
+        save_script(&path, &script)
     }
 
     fn apply_append_script_blocks(
@@ -208,6 +485,59 @@ impl WorkspaceMutator {
         script.meta.updated_at = self.now;
         save_script(&path, &script)
     }
+
+    fn apply_delete_script_block(
+        &mut self,
+        script_id: Uuid,
+        block_id: Uuid,
+    ) -> anyhow::Result<()> {
+        let (path, mut script) = self.script_file(script_id)?;
+        let idx = script
+            .blocks
+            .iter()
+            .position(|b| b.id == block_id)
+            .with_context(|| format!("script block {block_id} not found"))?;
+        script.remove_block(idx)?;
+        script.meta.updated_at = self.now;
+        save_script(&path, &script)
+    }
+
+    fn apply_move_script_block(
+        &mut self,
+        script_id: Uuid,
+        block_id: Uuid,
+        to_index: usize,
+    ) -> anyhow::Result<()> {
+        let (path, mut script) = self.script_file(script_id)?;
+        let from = script
+            .blocks
+            .iter()
+            .position(|b| b.id == block_id)
+            .with_context(|| format!("script block {block_id} not found"))?;
+        script.move_block(from, to_index)?;
+        script.meta.updated_at = self.now;
+        save_script(&path, &script)
+    }
+
+    fn apply_update_project_meta(
+        &mut self,
+        title: Option<String>,
+        style_guide: Option<String>,
+        synopsis: Option<String>,
+    ) -> anyhow::Result<()> {
+        let mut project = load_project(&self.project_dir)?;
+        if let Some(t) = title {
+            project.title = t;
+        }
+        if let Some(s) = style_guide {
+            project.ai_context.style_guide = s;
+        }
+        if let Some(s) = synopsis {
+            project.ai_context.synopsis = s;
+        }
+        project.updated_at = self.now;
+        save_project(&self.project_dir, &project)
+    }
 }
 
 fn script_file_stem(title: &str, id: Uuid) -> String {
@@ -241,6 +571,77 @@ impl ProjectMutator for WorkspaceMutator {
                 blocks,
                 ..
             } => self.apply_replace_blocks(*chapter_id, target_ids, blocks.clone()),
+            AiIntent::UpdateBlock {
+                chapter_id,
+                block_id,
+                content,
+                block_type,
+                speaker,
+                ..
+            } => self.apply_update_block(
+                *chapter_id,
+                *block_id,
+                content.clone(),
+                *block_type,
+                speaker.clone(),
+            ),
+            AiIntent::DeleteBlock {
+                chapter_id,
+                block_id,
+                ..
+            } => self.apply_delete_block(*chapter_id, *block_id),
+            AiIntent::MoveBlock {
+                chapter_id,
+                block_id,
+                to_index,
+                ..
+            } => self.apply_move_block(*chapter_id, *block_id, *to_index),
+            AiIntent::CreateChapterDirectory {
+                parent_rel, name, ..
+            } => self.apply_create_chapter_directory(parent_rel.clone(), name.clone()),
+            AiIntent::CreateChapterFile {
+                chapter_id,
+                parent_rel,
+                name,
+                title,
+                ..
+            } => self.apply_create_chapter_file(
+                *chapter_id,
+                parent_rel.clone(),
+                name.clone(),
+                title.clone(),
+            ),
+            AiIntent::RenameChapterNode {
+                rel_path, new_name, ..
+            } => self.apply_rename_chapter_node(rel_path.clone(), new_name.clone()),
+            AiIntent::DeleteChapterNode { rel_path, .. } => {
+                self.apply_delete_chapter_node(rel_path.clone())
+            }
+            AiIntent::MoveChapterNode {
+                rel_path,
+                dest_parent_rel,
+                ..
+            } => self.apply_move_chapter_node(rel_path.clone(), dest_parent_rel.clone()),
+            AiIntent::MoveChapterSibling {
+                rel_path,
+                direction,
+                ..
+            } => self.apply_move_chapter_sibling(rel_path.clone(), *direction),
+            AiIntent::CopyChapter {
+                src_rel,
+                dest_parent_rel,
+                new_name,
+                new_chapter_id,
+                ..
+            } => self.apply_copy_chapter(
+                src_rel.clone(),
+                dest_parent_rel.clone(),
+                new_name.clone(),
+                *new_chapter_id,
+            ),
+            AiIntent::UpdateChapterTitle {
+                chapter_id, title, ..
+            } => self.apply_update_chapter_title(*chapter_id, title.clone()),
             AiIntent::CreateOutlineEntry {
                 category,
                 key,
@@ -254,7 +655,53 @@ impl ProjectMutator for WorkspaceMutator {
                 fields,
                 ..
             } => self.apply_update_outline_entry(*id, key.clone(), *category, fields.clone()),
-            AiIntent::CreateScript { title, .. } => self.apply_create_script(title.clone()),
+            AiIntent::DeleteOutlineEntry { id, .. } => self.apply_delete_outline_entry(*id),
+            AiIntent::CreateScript {
+                title,
+                parent_rel,
+                script_id,
+                name,
+                ..
+            } => self.apply_create_script(
+                title.clone(),
+                parent_rel.clone(),
+                *script_id,
+                name.clone(),
+            ),
+            AiIntent::CreateScriptDirectory {
+                parent_rel, name, ..
+            } => self.apply_create_script_directory(parent_rel.clone(), name.clone()),
+            AiIntent::RenameScriptNode {
+                rel_path, new_name, ..
+            } => self.apply_rename_script_node(rel_path.clone(), new_name.clone()),
+            AiIntent::DeleteScriptNode { rel_path, .. } => {
+                self.apply_delete_script_node(rel_path.clone())
+            }
+            AiIntent::MoveScriptNode {
+                rel_path,
+                dest_parent_rel,
+                ..
+            } => self.apply_move_script_node(rel_path.clone(), dest_parent_rel.clone()),
+            AiIntent::MoveScriptSibling {
+                rel_path,
+                direction,
+                ..
+            } => self.apply_move_script_sibling(rel_path.clone(), *direction),
+            AiIntent::CopyScript {
+                src_rel,
+                dest_parent_rel,
+                new_name,
+                new_script_id,
+                ..
+            } => self.apply_copy_script(
+                src_rel.clone(),
+                dest_parent_rel.clone(),
+                new_name.clone(),
+                *new_script_id,
+            ),
+            AiIntent::UpdateScriptTitle {
+                script_id, title, ..
+            } => self.apply_update_script_title(*script_id, title.clone()),
             AiIntent::AppendScriptBlocks {
                 script_id, blocks, ..
             } => self.apply_append_script_blocks(*script_id, blocks.clone()),
@@ -264,6 +711,27 @@ impl ProjectMutator for WorkspaceMutator {
                 fields,
                 ..
             } => self.apply_update_script_block(*script_id, *block_id, fields),
+            AiIntent::DeleteScriptBlock {
+                script_id,
+                block_id,
+                ..
+            } => self.apply_delete_script_block(*script_id, *block_id),
+            AiIntent::MoveScriptBlock {
+                script_id,
+                block_id,
+                to_index,
+                ..
+            } => self.apply_move_script_block(*script_id, *block_id, *to_index),
+            AiIntent::UpdateProjectMeta {
+                title,
+                style_guide,
+                synopsis,
+                ..
+            } => self.apply_update_project_meta(
+                title.clone(),
+                style_guide.clone(),
+                synopsis.clone(),
+            ),
         }
     }
 }
@@ -309,5 +777,37 @@ mod tests {
             "expected persisted block, got {:?}",
             loaded.blocks.iter().map(|b| &b.content).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn workspace_mutator_create_directory_and_chapter_file() {
+        let dir = tempdir().unwrap();
+        let (project_dir, _project) = create_project(dir.path(), "测试书", now()).unwrap();
+        let mut m = WorkspaceMutator::open(&project_dir).with_now(now());
+
+        m.apply(&AiIntent::CreateChapterDirectory {
+            intent_id: Uuid::nil(),
+            parent_rel: String::new(),
+            name: "vol-001".into(),
+        })
+        .unwrap();
+
+        let chapter_id = Uuid::from_u128(99);
+        m.apply(&AiIntent::CreateChapterFile {
+            intent_id: Uuid::nil(),
+            chapter_id,
+            parent_rel: "vol-001".into(),
+            name: "ch-001".into(),
+            title: "第一章".into(),
+        })
+        .unwrap();
+
+        let tree = scan_chapter_tree(&project_dir).unwrap();
+        let node = find_node_by_chapter_id(&tree, chapter_id).expect("chapter on disk");
+        assert_eq!(node.rel_path, "vol-001/ch-001.json");
+        let path = resolve_rel(&project_dir, &node.rel_path).unwrap();
+        let loaded = load_chapter(&path).unwrap();
+        assert_eq!(loaded.title, "第一章");
+        assert_eq!(loaded.id, chapter_id);
     }
 }

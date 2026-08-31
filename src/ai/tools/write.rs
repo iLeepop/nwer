@@ -13,7 +13,7 @@ use crate::models::{
 use super::SharedCtx;
 use super::SharedAiCtx;
 
-type ToolResult = Result<serde_json::Value, Box<dyn std::error::Error>>;
+pub(crate) type ToolResult = Result<serde_json::Value, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Deserialize)]
 struct CreateBlockArgs {
@@ -43,6 +43,21 @@ struct ProposeReplaceBlocksArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateChapterDirectoryArgs {
+    #[serde(default)]
+    parent_rel: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateChapterFileArgs {
+    #[serde(default)]
+    parent_rel: String,
+    name: String,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateOutlineEntryArgs {
     category: OutlineCategory,
     key: String,
@@ -64,6 +79,10 @@ struct UpdateOutlineEntryArgs {
 #[derive(Debug, Deserialize)]
 struct CreateScriptArgs {
     title: String,
+    #[serde(default)]
+    parent_rel: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,11 +112,11 @@ struct UpdateScriptBlockArgs {
     block_type: Option<ScriptBlockType>,
 }
 
-fn new_intent_id() -> Uuid {
+pub(crate) fn new_intent_id() -> Uuid {
     Uuid::now_v7()
 }
 
-fn error_receipt(summary: impl Into<String>, error: impl Into<String>) -> ToolResult {
+pub(crate) fn error_receipt(summary: impl Into<String>, error: impl Into<String>) -> ToolResult {
     Ok(serde_json::to_value(ToolReceipt {
         status: IntentStatus::Error,
         intent_id: new_intent_id(),
@@ -163,7 +182,7 @@ fn script_block_input_to_block(input: ScriptBlockInput) -> Result<ScriptBlock, S
     Ok(block)
 }
 
-fn apply_via_policy(ctx: &SharedCtx, intent: AiIntent) -> ToolResult {
+pub(crate) fn apply_via_policy(ctx: &SharedCtx, intent: AiIntent) -> ToolResult {
     let mut guard = ctx.lock().map_err(|e| e.to_string())?;
     let auto_apply = guard.policy.auto_apply;
     let SharedAiCtx {
@@ -277,6 +296,82 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
     {
         let ctx = ctx.clone();
         reg.register(
+            "create_chapter_directory",
+            "在章节树 parent_rel（空=根）下创建子目录；name 须为合法存储名（无路径分隔符）",
+            ToolParameters::new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "parent_rel": {
+                        "type": "string",
+                        "description": "相对 chapters/ 的父目录，空字符串表示根",
+                    },
+                    "name": { "type": "string" },
+                },
+                "required": ["name"],
+            })),
+            move |args: CreateChapterDirectoryArgs| {
+                let ctx = ctx.clone();
+                async move {
+                    if args.name.trim().is_empty() {
+                        return error_receipt("创建章节目录", "name 不能为空");
+                    }
+                    let intent = AiIntent::CreateChapterDirectory {
+                        intent_id: new_intent_id(),
+                        parent_rel: args.parent_rel,
+                        name: args.name,
+                    };
+                    apply_via_policy(&ctx, intent)
+                }
+            },
+        );
+    }
+
+    {
+        let ctx = ctx.clone();
+        reg.register(
+            "create_chapter_file",
+            "在指定目录下创建章节正文文件；返回提案含 chapter_id，可再 create_block / propose_replace_blocks",
+            ToolParameters::new(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "parent_rel": {
+                        "type": "string",
+                        "description": "相对 chapters/ 的父目录，空字符串表示根",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "文件名（不含 .json），如 ch-001开篇",
+                    },
+                    "title": { "type": "string", "description": "章节显示标题" },
+                },
+                "required": ["name", "title"],
+            })),
+            move |args: CreateChapterFileArgs| {
+                let ctx = ctx.clone();
+                async move {
+                    if args.name.trim().is_empty() {
+                        return error_receipt("创建章节文件", "name 不能为空");
+                    }
+                    if args.title.trim().is_empty() {
+                        return error_receipt("创建章节文件", "title 不能为空");
+                    }
+                    let chapter_id = new_intent_id();
+                    let intent = AiIntent::CreateChapterFile {
+                        intent_id: new_intent_id(),
+                        chapter_id,
+                        parent_rel: args.parent_rel,
+                        name: args.name,
+                        title: args.title,
+                    };
+                    apply_via_policy(&ctx, intent)
+                }
+            },
+        );
+    }
+
+    {
+        let ctx = ctx.clone();
+        reg.register(
             "create_outline_entry",
             "创建大纲条目",
             ToolParameters::new(serde_json::json!({
@@ -353,11 +448,19 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
         let ctx = ctx.clone();
         reg.register(
             "create_script",
-            "创建新剧本",
+            "创建新剧本；可选 parent_rel / name（相对 scripts/）",
             ToolParameters::new(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string" },
+                    "parent_rel": {
+                        "type": "string",
+                        "description": "相对 scripts/ 的父目录，空字符串表示根",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "文件名（不含 .json）；省略则由系统生成",
+                    },
                 },
                 "required": ["title"],
             })),
@@ -367,9 +470,17 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                     if args.title.trim().is_empty() {
                         return error_receipt("创建剧本", "title 不能为空");
                     }
+                    if let Some(ref name) = args.name {
+                        if name.trim().is_empty() {
+                            return error_receipt("创建剧本", "name 不能为空");
+                        }
+                    }
                     let intent = AiIntent::CreateScript {
                         intent_id: new_intent_id(),
                         title: args.title,
+                        parent_rel: args.parent_rel,
+                        script_id: None,
+                        name: args.name,
                     };
                     apply_via_policy(&ctx, intent)
                 }

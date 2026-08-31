@@ -14,10 +14,35 @@ pub struct AiChatMessage {
     pub text: String,
 }
 
+/// 会话级 max_tokens 档位（不持久化；重启默认 Auto）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiMaxTokenTier {
+    #[default]
+    Auto,
+    Low,
+    High,
+}
+
+impl AiMaxTokenTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动",
+            Self::Low => "低",
+            Self::High => "高",
+        }
+    }
+
+    pub fn all() -> [Self; 3] {
+        [Self::Auto, Self::Low, Self::High]
+    }
+}
+
 /// AI 面板会话状态（不持久化）。
 #[derive(Debug, Clone)]
 pub struct AiUiState {
     pub auto_apply: bool,
+    /// 输出长度档位：自动 / 低 / 高。
+    pub max_token_tier: AiMaxTokenTier,
     pub messages: Vec<AiChatMessage>,
     pub proposals: ProposalStore,
     pub busy: bool,
@@ -30,6 +55,7 @@ impl Default for AiUiState {
     fn default() -> Self {
         Self {
             auto_apply: false,
+            max_token_tier: AiMaxTokenTier::Auto,
             messages: Vec::new(),
             proposals: ProposalStore::default(),
             busy: false,

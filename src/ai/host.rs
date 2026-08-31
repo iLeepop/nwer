@@ -73,12 +73,20 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
         }
     }
 
-    pub async fn run(&mut self, action: AiAction, user_prompt: &str) -> anyhow::Result<String> {
+    pub async fn run(
+        &mut self,
+        action: AiAction,
+        user_prompt: &str,
+        max_tokens: u32,
+        max_tool_rounds: u32,
+    ) -> anyhow::Result<String> {
         let tools = build_all_tools(self.ctx.clone());
         let mut agent = FunctionCallAgent::from_parts(
             "nwer",
             FunctionCallAgent::<RaiLLM>::DEFAULT_SYSTEM_PROMPT,
-            Config::default(),
+            Config::default()
+                .with_max_token(max_tokens)
+                .with_max_tool_rounds(max_tool_rounds.max(1)),
             self.llm.clone(),
             tools,
         );
@@ -245,7 +253,15 @@ mod tests {
             },
         ]);
         let mut host = AiSessionHost::from_llm(fake, SharedAiCtx::new(false), lean_ctx());
-        let reply = host.run(AiAction::Chat, "写一段叙述").await.unwrap();
+        let reply = host
+            .run(
+                AiAction::Chat,
+                "写一段叙述",
+                RaiLLM::MAX_TOKENS_NORMAL,
+                8,
+            )
+            .await
+            .unwrap();
         assert!(
             reply.contains("提案") || reply.contains("已"),
             "unexpected reply: {reply}"

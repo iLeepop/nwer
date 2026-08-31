@@ -7,9 +7,13 @@ use uuid::Uuid;
 use crate::ai::host::{LeanContext, LeanFocus, LeanSelection};
 use crate::ai::mutator::InMemoryMutator;
 use crate::ai::provider::{ChapterContext, ProjectContext};
+use crate::ai::ui_state::AiMaxTokenTier;
 use crate::ai::SharedAiCtx;
 use crate::app::AppState;
-use crate::storage::AiSettings;
+use crate::storage::{AiSettings, ChapterTreeNode, ScriptTreeNode};
+
+/// 高档固定值（高于 raiL `MAX_TOKENS_REASONING`，适合长文/多轮工具）。
+pub const MAX_TOKENS_HIGH: u32 = 16_384;
 
 /// 将设置中的 provider 字符串映射为 raiL Provider。
 pub fn provider_from_settings(provider: &str) -> Provider {
@@ -20,6 +24,18 @@ pub fn provider_from_settings(provider: &str) -> Provider {
         "vllm" => Provider::VLLM,
         "local" => Provider::LOCAL,
         _ => Provider::DEEPSEEK,
+    }
+}
+
+/// 按档位 + 供应商解析实际 max_tokens。
+pub fn resolve_max_tokens(tier: AiMaxTokenTier, provider: &str) -> u32 {
+    match tier {
+        AiMaxTokenTier::Low => RaiLLM::MAX_TOKENS_SHORT,
+        AiMaxTokenTier::High => MAX_TOKENS_HIGH,
+        AiMaxTokenTier::Auto => match provider_from_settings(provider) {
+            Provider::DEEPSEEK | Provider::KIMI => RaiLLM::MAX_TOKENS_REASONING,
+            _ => RaiLLM::MAX_TOKENS_LONG,
+        },
     }
 }
 
@@ -146,6 +162,8 @@ pub fn hydrate_shared_ctx(state: &AppState) -> SharedAiCtx {
         mutator.style_guide = p.ai_context.style_guide.clone();
         mutator.synopsis = p.ai_context.synopsis.clone();
     }
+    hydrate_chapter_tree(&mut mutator, &state.chapter_tree);
+    hydrate_script_tree(&mut mutator, &state.script_tree);
     if let Some(ch) = state.current_chapter.as_ref() {
         mutator.upsert_chapter(ch.clone());
     }
@@ -159,6 +177,40 @@ pub fn hydrate_shared_ctx(state: &AppState) -> SharedAiCtx {
         mutator,
         proposals: Default::default(),
         policy: crate::ai::EffectPolicy::new(false),
+        ui_commands: Vec::new(),
+    }
+}
+
+fn hydrate_chapter_tree(mutator: &mut InMemoryMutator, nodes: &[ChapterTreeNode]) {
+    for node in nodes {
+        if node.is_directory() {
+            mutator.ensure_dir(node.rel_path.clone());
+            hydrate_chapter_tree(mutator, &node.children);
+        } else if let Some(id) = node.chapter_id {
+            mutator.set_chapter_rel(id, node.rel_path.clone());
+            if mutator.get_chapter(id).is_none() {
+                let title = node.title.clone().unwrap_or_else(|| node.name.clone());
+                mutator.ensure_chapter(id, title);
+            }
+        }
+    }
+}
+
+fn hydrate_script_tree(mutator: &mut InMemoryMutator, nodes: &[ScriptTreeNode]) {
+    for node in nodes {
+        if node.is_directory() {
+            mutator.ensure_script_dir(node.rel_path.clone());
+            hydrate_script_tree(mutator, &node.children);
+        } else if let Some(id) = node.script_id {
+            mutator.set_script_rel(id, node.rel_path.clone());
+            if mutator.get_script(id).is_none() {
+                let title = node.title.clone().unwrap_or_else(|| node.name.clone());
+                let mut script = crate::models::Script::new(title, chrono::Utc::now());
+                script.id = id;
+                script.blocks.clear();
+                mutator.ensure_script(script);
+            }
+        }
     }
 }
 
@@ -174,6 +226,7 @@ pub fn chapter_context_from_app(state: &AppState) -> Option<ChapterContext> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::ui_state::AiMaxTokenTier;
     use crate::storage::AiSettings;
 
     #[test]
@@ -196,5 +249,33 @@ mod tests {
             provider_from_settings("DeepSeek"),
             Provider::DEEPSEEK
         ));
+    }
+
+    #[test]
+    fn resolve_max_tokens_tiers() {
+        assert_eq!(
+            resolve_max_tokens(AiMaxTokenTier::Low, "deepseek"),
+            RaiLLM::MAX_TOKENS_SHORT
+        );
+        assert_eq!(
+            resolve_max_tokens(AiMaxTokenTier::High, "ollama"),
+            MAX_TOKENS_HIGH
+        );
+        assert_eq!(
+            resolve_max_tokens(AiMaxTokenTier::Auto, "deepseek"),
+            RaiLLM::MAX_TOKENS_REASONING
+        );
+        assert_eq!(
+            resolve_max_tokens(AiMaxTokenTier::Auto, "kimi"),
+            RaiLLM::MAX_TOKENS_REASONING
+        );
+        assert_eq!(
+            resolve_max_tokens(AiMaxTokenTier::Auto, "ollama"),
+            RaiLLM::MAX_TOKENS_LONG
+        );
+        assert_eq!(
+            resolve_max_tokens(AiMaxTokenTier::Auto, "vllm"),
+            RaiLLM::MAX_TOKENS_LONG
+        );
     }
 }

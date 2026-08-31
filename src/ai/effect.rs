@@ -184,11 +184,52 @@ pub fn summarize_intent(intent: &AiIntent) -> String {
             format!("创建{label}块")
         }
         AiIntent::ReplaceBlocks { .. } => "替换块".into(),
+        AiIntent::UpdateBlock { .. } => "更新块".into(),
+        AiIntent::DeleteBlock { .. } => "删除块".into(),
+        AiIntent::MoveBlock { .. } => "移动块".into(),
+        AiIntent::CreateChapterDirectory { parent_rel, name, .. } => {
+            if parent_rel.is_empty() {
+                format!("创建章节目录 {name}")
+            } else {
+                format!("创建章节目录 {parent_rel}/{name}")
+            }
+        }
+        AiIntent::CreateChapterFile {
+            title,
+            chapter_id,
+            parent_rel,
+            name,
+            ..
+        } => {
+            let path = if parent_rel.is_empty() {
+                format!("{name}.json")
+            } else {
+                format!("{parent_rel}/{name}.json")
+            };
+            format!("创建章节 {title} @ {path} (chapter_id={chapter_id})")
+        }
+        AiIntent::RenameChapterNode { .. } => "重命名章节节点".into(),
+        AiIntent::DeleteChapterNode { .. } => "删除章节节点".into(),
+        AiIntent::MoveChapterNode { .. } => "移动章节节点".into(),
+        AiIntent::MoveChapterSibling { .. } => "调整章节顺序".into(),
+        AiIntent::CopyChapter { .. } => "复制章节".into(),
+        AiIntent::UpdateChapterTitle { .. } => "更新章节标题".into(),
         AiIntent::CreateOutlineEntry { .. } => "创建大纲条目".into(),
         AiIntent::UpdateOutlineEntry { .. } => "更新大纲条目".into(),
+        AiIntent::DeleteOutlineEntry { .. } => "删除大纲条目".into(),
         AiIntent::CreateScript { .. } => "创建剧本".into(),
+        AiIntent::CreateScriptDirectory { .. } => "创建剧本目录".into(),
+        AiIntent::RenameScriptNode { .. } => "重命名剧本节点".into(),
+        AiIntent::DeleteScriptNode { .. } => "删除剧本节点".into(),
+        AiIntent::MoveScriptNode { .. } => "移动剧本节点".into(),
+        AiIntent::MoveScriptSibling { .. } => "调整剧本顺序".into(),
+        AiIntent::CopyScript { .. } => "复制剧本".into(),
+        AiIntent::UpdateScriptTitle { .. } => "更新剧本标题".into(),
         AiIntent::AppendScriptBlocks { .. } => "追加剧本块".into(),
         AiIntent::UpdateScriptBlock { .. } => "更新剧本块".into(),
+        AiIntent::DeleteScriptBlock { .. } => "删除剧本块".into(),
+        AiIntent::MoveScriptBlock { .. } => "移动剧本块".into(),
+        AiIntent::UpdateProjectMeta { .. } => "更新项目元信息".into(),
     }
 }
 

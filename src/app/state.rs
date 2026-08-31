@@ -225,6 +225,10 @@ impl AppState {
         self.ai.auto_apply = !self.ai.auto_apply;
     }
 
+    pub fn set_ai_max_token_tier(&mut self, tier: crate::ai::AiMaxTokenTier) {
+        self.ai.max_token_tier = tier;
+    }
+
     pub fn ai_push_user_message(&mut self, text: impl Into<String>) {
         self.ai.messages.push(AiChatMessage {
             role: AiChatRole::User,
@@ -340,11 +344,12 @@ impl AppState {
         self.ai.status_message = Some("请从面板发送以启动 Agent".into());
     }
 
-    /// Host 跑完后合并提案；若自动应用则经 WorkspaceMutator 落盘。
+    /// Host 跑完后合并提案与 UI 指令；若自动应用则经 WorkspaceMutator 落盘。
     pub fn ai_ingest_host_result(
         &mut self,
         reply: String,
         mut proposals: crate::ai::ProposalStore,
+        ui_commands: Vec<crate::ai::AiUiCommand>,
         now: DateTime<Utc>,
     ) -> Result<()> {
         self.ai.busy = false;
@@ -361,6 +366,41 @@ impl AppState {
             self.ai.status_message = None;
         } else {
             self.ai.status_message = Some(format!("有 {} 条提案待确认", self.ai.proposals.len()));
+        }
+        self.ai_apply_ui_commands(ui_commands, now)?;
+        Ok(())
+    }
+
+    /// 应用 Host 收集的 open_* 等即时指令。
+    pub fn ai_apply_ui_commands(
+        &mut self,
+        commands: Vec<crate::ai::AiUiCommand>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        for cmd in commands {
+            match cmd {
+                crate::ai::AiUiCommand::OpenChapter { chapter_id } => {
+                    self.refresh_chapter_tree()?;
+                    if let Some(node) = find_node_by_chapter_id(&self.chapter_tree, chapter_id) {
+                        let rel = node.rel_path.clone();
+                        self.set_sidebar_tab(SidebarTab::Chapters);
+                        self.select_chapter(&rel, now)?;
+                    }
+                }
+                crate::ai::AiUiCommand::OpenScript { script_id } => {
+                    self.refresh_script_tree()?;
+                    if let Some(node) = find_node_by_script_id(&self.script_tree, script_id) {
+                        let rel = node.rel_path.clone();
+                        self.set_sidebar_tab(SidebarTab::Scripts);
+                        self.select_script(&rel, now)?;
+                    }
+                }
+                crate::ai::AiUiCommand::OpenOutline { outline_id } => {
+                    self.refresh_outline_entries()?;
+                    self.set_sidebar_tab(SidebarTab::Outline);
+                    self.select_outline(outline_id, now)?;
+                }
+            }
         }
         Ok(())
     }
@@ -414,7 +454,8 @@ impl AppState {
     }
 
     /// 更新全局 AI 设置并写入 config.json。
-    pub fn set_ai_settings(&mut self, ai: crate::storage::AiSettings) -> Result<()> {
+    pub fn set_ai_settings(&mut self, mut ai: crate::storage::AiSettings) -> Result<()> {
+        ai.max_tool_rounds = crate::storage::clamp_max_tool_rounds(ai.max_tool_rounds);
         self.config.ai = ai;
         save_config_to(&self.config_path, &self.config)?;
         Ok(())
@@ -1789,6 +1830,16 @@ mod tests {
         assert!(state.ai.proposals.is_empty());
         assert!(!state.ai.busy);
         assert!(state.ai.messages.is_empty());
+        assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::Auto);
+    }
+
+    #[test]
+    fn set_ai_max_token_tier_updates_session_state() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.set_ai_max_token_tier(crate::ai::AiMaxTokenTier::High);
+        assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::High);
+        state.set_ai_max_token_tier(crate::ai::AiMaxTokenTier::Low);
+        assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::Low);
     }
 
     #[test]
@@ -1931,7 +1982,7 @@ mod tests {
         });
 
         state
-            .ai_ingest_host_result("好的".into(), store, now())
+            .ai_ingest_host_result("好的".into(), store, Vec::new(), now())
             .unwrap();
 
         assert!(!state.ai.busy);
@@ -1944,6 +1995,31 @@ mod tests {
                 .as_deref()
                 .is_some_and(|s| s.contains("1"))
         );
+    }
+
+    #[test]
+    fn ai_apply_ui_commands_opens_chapter_by_id() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("焦点", now()).unwrap();
+        let rel = state
+            .create_chapter_under("", "ch-001", "第一章", now())
+            .unwrap();
+        let chapter_id = state.current_chapter.as_ref().unwrap().id;
+        // leave chapter
+        state.select_directory("");
+        state.current_chapter = None;
+        state.current_chapter_path = None;
+
+        state
+            .ai_apply_ui_commands(
+                vec![crate::ai::AiUiCommand::OpenChapter { chapter_id }],
+                now(),
+            )
+            .unwrap();
+
+        assert_eq!(state.current_chapter_path.as_deref(), Some(rel.as_str()));
+        assert_eq!(state.current_chapter.as_ref().unwrap().id, chapter_id);
+        assert_eq!(state.ui.sidebar_tab, SidebarTab::Chapters);
     }
 
     #[test]
@@ -2241,6 +2317,7 @@ mod tests {
             api_key: "sk-abc".into(),
             base_url: "https://api.moonshot.cn/v1".into(),
             model: "moonshot-v1".into(),
+            max_tool_rounds: 16,
         };
         state.set_ai_settings(ai.clone()).unwrap();
         assert_eq!(state.ai_settings(), &ai);

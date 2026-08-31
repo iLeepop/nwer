@@ -25,6 +25,72 @@ pub enum AiIntent {
         target_ids: Vec<Uuid>,
         blocks: Vec<Block>,
     },
+    UpdateBlock {
+        intent_id: Uuid,
+        chapter_id: Uuid,
+        block_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_type: Option<BlockType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
+    },
+    DeleteBlock {
+        intent_id: Uuid,
+        chapter_id: Uuid,
+        block_id: Uuid,
+    },
+    MoveBlock {
+        intent_id: Uuid,
+        chapter_id: Uuid,
+        block_id: Uuid,
+        to_index: usize,
+    },
+    CreateChapterDirectory {
+        intent_id: Uuid,
+        parent_rel: String,
+        name: String,
+    },
+    CreateChapterFile {
+        intent_id: Uuid,
+        chapter_id: Uuid,
+        parent_rel: String,
+        name: String,
+        title: String,
+    },
+    RenameChapterNode {
+        intent_id: Uuid,
+        rel_path: String,
+        new_name: String,
+    },
+    DeleteChapterNode {
+        intent_id: Uuid,
+        rel_path: String,
+    },
+    MoveChapterNode {
+        intent_id: Uuid,
+        rel_path: String,
+        dest_parent_rel: String,
+    },
+    MoveChapterSibling {
+        intent_id: Uuid,
+        rel_path: String,
+        /// -1 = up, 1 = down
+        direction: i8,
+    },
+    CopyChapter {
+        intent_id: Uuid,
+        src_rel: String,
+        dest_parent_rel: String,
+        new_name: String,
+        new_chapter_id: Uuid,
+    },
+    UpdateChapterTitle {
+        intent_id: Uuid,
+        chapter_id: Uuid,
+        title: String,
+    },
     CreateOutlineEntry {
         intent_id: Uuid,
         category: OutlineCategory,
@@ -42,8 +108,54 @@ pub enum AiIntent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fields: Option<BTreeMap<String, String>>,
     },
+    DeleteOutlineEntry {
+        intent_id: Uuid,
+        id: Uuid,
+    },
     CreateScript {
         intent_id: Uuid,
+        title: String,
+        #[serde(default)]
+        parent_rel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    CreateScriptDirectory {
+        intent_id: Uuid,
+        parent_rel: String,
+        name: String,
+    },
+    RenameScriptNode {
+        intent_id: Uuid,
+        rel_path: String,
+        new_name: String,
+    },
+    DeleteScriptNode {
+        intent_id: Uuid,
+        rel_path: String,
+    },
+    MoveScriptNode {
+        intent_id: Uuid,
+        rel_path: String,
+        dest_parent_rel: String,
+    },
+    MoveScriptSibling {
+        intent_id: Uuid,
+        rel_path: String,
+        direction: i8,
+    },
+    CopyScript {
+        intent_id: Uuid,
+        src_rel: String,
+        dest_parent_rel: String,
+        new_name: String,
+        new_script_id: Uuid,
+    },
+    UpdateScriptTitle {
+        intent_id: Uuid,
+        script_id: Uuid,
         title: String,
     },
     AppendScriptBlocks {
@@ -58,6 +170,26 @@ pub enum AiIntent {
         #[serde(flatten)]
         fields: ScriptBlockUpdateFields,
     },
+    DeleteScriptBlock {
+        intent_id: Uuid,
+        script_id: Uuid,
+        block_id: Uuid,
+    },
+    MoveScriptBlock {
+        intent_id: Uuid,
+        script_id: Uuid,
+        block_id: Uuid,
+        to_index: usize,
+    },
+    UpdateProjectMeta {
+        intent_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_guide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        synopsis: Option<String>,
+    },
 }
 
 impl AiIntent {
@@ -65,11 +197,33 @@ impl AiIntent {
         match self {
             Self::CreateBlock { intent_id, .. }
             | Self::ReplaceBlocks { intent_id, .. }
+            | Self::UpdateBlock { intent_id, .. }
+            | Self::DeleteBlock { intent_id, .. }
+            | Self::MoveBlock { intent_id, .. }
+            | Self::CreateChapterDirectory { intent_id, .. }
+            | Self::CreateChapterFile { intent_id, .. }
+            | Self::RenameChapterNode { intent_id, .. }
+            | Self::DeleteChapterNode { intent_id, .. }
+            | Self::MoveChapterNode { intent_id, .. }
+            | Self::MoveChapterSibling { intent_id, .. }
+            | Self::CopyChapter { intent_id, .. }
+            | Self::UpdateChapterTitle { intent_id, .. }
             | Self::CreateOutlineEntry { intent_id, .. }
             | Self::UpdateOutlineEntry { intent_id, .. }
+            | Self::DeleteOutlineEntry { intent_id, .. }
             | Self::CreateScript { intent_id, .. }
+            | Self::CreateScriptDirectory { intent_id, .. }
+            | Self::RenameScriptNode { intent_id, .. }
+            | Self::DeleteScriptNode { intent_id, .. }
+            | Self::MoveScriptNode { intent_id, .. }
+            | Self::MoveScriptSibling { intent_id, .. }
+            | Self::CopyScript { intent_id, .. }
+            | Self::UpdateScriptTitle { intent_id, .. }
             | Self::AppendScriptBlocks { intent_id, .. }
-            | Self::UpdateScriptBlock { intent_id, .. } => *intent_id,
+            | Self::UpdateScriptBlock { intent_id, .. }
+            | Self::DeleteScriptBlock { intent_id, .. }
+            | Self::MoveScriptBlock { intent_id, .. }
+            | Self::UpdateProjectMeta { intent_id, .. } => *intent_id,
         }
     }
 }
