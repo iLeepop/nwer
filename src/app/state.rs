@@ -17,7 +17,7 @@ use crate::services::{
 };
 use crate::ai::{
     apply_all, apply_proposal, discard_all, discard_proposal, AiChatMessage, AiChatRole, AiIntent,
-    AiUiState, Proposal,
+    AiUiState, Proposal, WorkspaceMutator,
 };
 use crate::storage::{
     ChapterTreeNode, MoveDirection, RelPath, ScriptTreeNode, add_recent_project, copy_chapter,
@@ -246,17 +246,79 @@ impl AppState {
         });
     }
 
-    /// 经内存镜像应用提案。`now` 预留给落盘后刷新当前打开文档。
-    pub fn ai_apply_proposal(&mut self, intent_id: Uuid, _now: DateTime<Utc>) -> Result<()> {
-        apply_proposal(intent_id, &mut self.ai.proposals, &mut self.ai.mutator)
+    /// 有打开项目时经 WorkspaceMutator 落盘；否则走内存镜像。
+    pub fn ai_apply_proposal(&mut self, intent_id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        if self.project_dir.is_some() {
+            self.flush_save(SaveTrigger::BeforeLeave, now)?;
+            let project_dir = self.project_dir.clone().expect("project_dir");
+            let mut mutator = WorkspaceMutator::open(project_dir).with_now(now);
+            apply_proposal(intent_id, &mut self.ai.proposals, &mut mutator)?;
+            self.refresh_after_ai_mutate()
+        } else {
+            apply_proposal(intent_id, &mut self.ai.proposals, &mut self.ai.mutator)
+        }
     }
 
     pub fn ai_discard_proposal(&mut self, intent_id: Uuid) -> Result<()> {
         discard_proposal(intent_id, &mut self.ai.proposals)
     }
 
-    pub fn ai_apply_all_proposals(&mut self, _now: DateTime<Utc>) -> Result<()> {
-        apply_all(&mut self.ai.proposals, &mut self.ai.mutator)
+    pub fn ai_apply_all_proposals(&mut self, now: DateTime<Utc>) -> Result<()> {
+        if self.project_dir.is_some() {
+            self.flush_save(SaveTrigger::BeforeLeave, now)?;
+            let project_dir = self.project_dir.clone().expect("project_dir");
+            let mut mutator = WorkspaceMutator::open(project_dir).with_now(now);
+            apply_all(&mut self.ai.proposals, &mut mutator)?;
+            self.refresh_after_ai_mutate()
+        } else {
+            apply_all(&mut self.ai.proposals, &mut self.ai.mutator)
+        }
+    }
+
+    fn refresh_after_ai_mutate(&mut self) -> Result<()> {
+        self.refresh_chapter_tree()?;
+        self.refresh_script_tree()?;
+        self.refresh_outline_entries()?;
+
+        if let (Some(rel), Some(id)) = (
+            self.current_chapter_path.clone(),
+            self.current_chapter.as_ref().map(|c| c.id),
+        ) {
+            if let Some(project_dir) = self.project_dir.as_ref() {
+                if let Ok(path) = resolve_rel(project_dir, &rel) {
+                    if let Ok(loaded) = load_chapter(&path) {
+                        if loaded.id == id {
+                            self.current_chapter = Some(loaded);
+                            self.dirty = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let (Some(rel), Some(id)) = (
+            self.current_script_path.clone(),
+            self.current_script.as_ref().map(|s| s.id),
+        ) {
+            if let Some(project_dir) = self.project_dir.as_ref() {
+                if let Ok(path) = resolve_script_rel(project_dir, &rel) {
+                    if let Ok(loaded) = load_script(&path) {
+                        if loaded.id == id {
+                            self.current_script = Some(loaded);
+                            self.dirty = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(id) = self.current_outline.as_ref().map(|e| e.id) {
+            if let Some(entry) = self.outline_entries.iter().find(|e| e.id == id).cloned() {
+                self.current_outline = Some(entry);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn ai_discard_all_proposals(&mut self) {
@@ -1704,6 +1766,41 @@ mod tests {
         assert_eq!(
             state.ai.mutator.chapter_blocks(chapter_id).unwrap().len(),
             1
+        );
+    }
+
+    #[test]
+    fn ai_apply_proposal_persists_when_project_open() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("落盘书", now()).unwrap();
+        state
+            .create_chapter_under("", "ch-001", "第一章", now())
+            .unwrap();
+        let chapter_id = state.current_chapter.as_ref().unwrap().id;
+        let intent_id = Uuid::from_u128(99);
+        state.ai_enqueue_proposal(crate::ai::AiIntent::CreateBlock {
+            intent_id,
+            chapter_id,
+            block_type: BlockType::Narration,
+            content: "从提案写入".into(),
+            speaker: None,
+            after_block_id: None,
+        });
+
+        state.ai_apply_proposal(intent_id, now()).unwrap();
+
+        assert!(state.ai.proposals.is_empty());
+        let chapter = state.current_chapter.as_ref().expect("chapter still open");
+        assert!(
+            chapter.blocks.iter().any(|b| b.content == "从提案写入"),
+            "current_chapter should reload applied block"
+        );
+        let project_dir = state.project_dir.as_ref().unwrap();
+        let rel = state.current_chapter_path.as_ref().unwrap();
+        let loaded = load_chapter(&resolve_rel(project_dir, rel).unwrap()).unwrap();
+        assert!(
+            loaded.blocks.iter().any(|b| b.content == "从提案写入"),
+            "applied block must persist on disk"
         );
     }
 

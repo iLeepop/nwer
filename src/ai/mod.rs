@@ -6,6 +6,7 @@ mod mutator;
 mod provider;
 mod tools;
 mod ui_state;
+mod workspace_mutator;
 
 pub use actions::action_prompt;
 pub use effect::{
@@ -16,6 +17,7 @@ pub use ui_state::{AiChatMessage, AiChatRole, AiUiState};
 pub use host::{format_lean_context, AiSessionHost, LeanContext, LeanFocus, LeanSelection};
 pub use intent::*;
 pub use mutator::{InMemoryMutator, ProjectMutator};
+pub use workspace_mutator::WorkspaceMutator;
 pub use provider::{
     AiAction, AiProvider, AiRequest, AiResponse, ChapterContext, ProjectContext, StubAiProvider,
 };
