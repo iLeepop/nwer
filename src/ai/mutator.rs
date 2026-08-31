@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 
 use crate::ai::{AiIntent, ScriptBlockUpdateFields};
@@ -50,6 +50,51 @@ impl InMemoryMutator {
             now,
             ..Self::new()
         }
+    }
+
+    /// 带样例章节与项目元信息的 mutator，供读工具测试使用。
+    pub fn with_sample_chapter() -> Self {
+        use crate::ai::AiIntent;
+        use crate::models::BlockType;
+
+        let mut m = Self::with_now(Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap());
+        m.title = "测试项目".into();
+        m.style_guide = "简洁文风".into();
+        m.synopsis = "样例简介".into();
+
+        let ch_id = Uuid::from_u128(1);
+        m.ensure_chapter(ch_id, "第一章");
+        m.apply(&AiIntent::CreateBlock {
+            intent_id: Uuid::nil(),
+            chapter_id: ch_id,
+            block_type: BlockType::Narration,
+            content: "开篇".into(),
+            speaker: None,
+            after_block_id: None,
+        })
+        .expect("sample chapter block");
+
+        m
+    }
+
+    pub fn list_chapters(&self) -> Vec<(Uuid, String)> {
+        let mut items: Vec<_> = self
+            .chapters
+            .iter()
+            .map(|(id, ch)| (*id, ch.title.clone()))
+            .collect();
+        items.sort_by_key(|(id, _)| *id);
+        items
+    }
+
+    pub fn list_scripts(&self) -> Vec<(Uuid, String)> {
+        let mut items: Vec<_> = self
+            .scripts
+            .iter()
+            .map(|(id, s)| (*id, s.title.clone()))
+            .collect();
+        items.sort_by_key(|(id, _)| *id);
+        items
     }
 
     /// 若章节不存在则创建空块列表的章节（不使用 `Chapter::new` 的默认块）。
