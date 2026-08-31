@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use rai_l::agent::core::ToolRegister;
 
 use crate::ai::{EffectPolicy, InMemoryMutator, ProposalStore};
+use uuid::Uuid;
 
 /// 读/写工具共享的 AI 会话上下文。
 pub struct SharedAiCtx {
@@ -29,6 +30,22 @@ impl SharedAiCtx {
             proposals: ProposalStore::default(),
             policy: EffectPolicy::new(auto_apply),
         }
+    }
+
+    pub fn apply_proposal(&mut self, intent_id: Uuid) -> anyhow::Result<()> {
+        crate::ai::apply_proposal(intent_id, &mut self.proposals, &mut self.mutator)
+    }
+
+    pub fn discard_proposal(&mut self, intent_id: Uuid) -> anyhow::Result<()> {
+        crate::ai::discard_proposal(intent_id, &mut self.proposals)
+    }
+
+    pub fn apply_all(&mut self) -> anyhow::Result<()> {
+        crate::ai::apply_all(&mut self.proposals, &mut self.mutator)
+    }
+
+    pub fn discard_all(&mut self) {
+        crate::ai::discard_all(&mut self.proposals)
     }
 }
 

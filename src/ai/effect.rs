@@ -21,6 +21,10 @@ impl ProposalStore {
         self.proposals.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.proposals.is_empty()
+    }
+
     pub fn push(&mut self, proposal: Proposal) {
         self.proposals.push(proposal);
     }
@@ -30,6 +34,86 @@ impl ProposalStore {
             .iter()
             .find(|p| p.intent.intent_id() == intent_id)
     }
+
+    pub fn get_mut(&mut self, intent_id: Uuid) -> Option<&mut Proposal> {
+        self.proposals
+            .iter_mut()
+            .find(|p| p.intent.intent_id() == intent_id)
+    }
+
+    pub fn remove(&mut self, intent_id: Uuid) -> Option<Proposal> {
+        let idx = self
+            .proposals
+            .iter()
+            .position(|p| p.intent.intent_id() == intent_id)?;
+        Some(self.proposals.remove(idx))
+    }
+
+    pub fn intent_ids(&self) -> Vec<Uuid> {
+        self.proposals
+            .iter()
+            .map(|p| p.intent.intent_id())
+            .collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.proposals.clear();
+    }
+}
+
+/// 将提案经 ProjectMutator 落盘；成功则移出队列。
+/// `ReplaceBlocks` 目标缺失时标 `stale` 并返回 Err，不部分应用。
+pub fn apply_proposal<M: ProjectMutator>(
+    intent_id: Uuid,
+    store: &mut ProposalStore,
+    mutator: &mut M,
+) -> anyhow::Result<()> {
+    let intent = store
+        .get(intent_id)
+        .ok_or_else(|| anyhow::anyhow!("proposal {intent_id} not found"))?
+        .intent
+        .clone();
+    let is_replace = matches!(intent, AiIntent::ReplaceBlocks { .. });
+
+    match mutator.apply(&intent) {
+        Ok(()) => {
+            store.remove(intent_id);
+            Ok(())
+        }
+        Err(e) => {
+            if is_replace {
+                if let Some(p) = store.get_mut(intent_id) {
+                    p.stale = true;
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 放弃单条提案。
+pub fn discard_proposal(intent_id: Uuid, store: &mut ProposalStore) -> anyhow::Result<()> {
+    store
+        .remove(intent_id)
+        .ok_or_else(|| anyhow::anyhow!("proposal {intent_id} not found"))?;
+    Ok(())
+}
+
+/// 按队列顺序应用全部提案；遇错即停。
+pub fn apply_all<M: ProjectMutator>(
+    store: &mut ProposalStore,
+    mutator: &mut M,
+) -> anyhow::Result<()> {
+    let ids = store.intent_ids();
+    for id in ids {
+        apply_proposal(id, store, mutator)?;
+    }
+    Ok(())
+}
+
+/// 清空提案队列。
+pub fn discard_all(store: &mut ProposalStore) {
+    store.clear();
 }
 
 /// 控制写意图是立即落盘还是先入提案队列。
@@ -161,5 +245,164 @@ mod tests {
         assert_eq!(receipt.status, IntentStatus::Applied);
         assert_eq!(store.len(), 0);
         assert_eq!(mutator.applied.len(), 1);
+    }
+
+    #[test]
+    fn apply_proposal_success() {
+        let mut ctx = crate::ai::SharedAiCtx::with_sample_chapter(false);
+        let chapter_id = Uuid::from_u128(1);
+        let intent_id = Uuid::from_u128(10);
+        let initial_len = ctx.mutator.chapter_blocks(chapter_id).unwrap().len();
+        ctx.proposals.push(Proposal {
+            intent: AiIntent::CreateBlock {
+                intent_id,
+                chapter_id,
+                block_type: BlockType::Narration,
+                content: "新段落".into(),
+                speaker: None,
+                after_block_id: None,
+            },
+            stale: false,
+        });
+
+        apply_proposal(intent_id, &mut ctx.proposals, &mut ctx.mutator).unwrap();
+
+        assert!(ctx.proposals.is_empty());
+        assert_eq!(
+            ctx.mutator.chapter_blocks(chapter_id).unwrap().len(),
+            initial_len + 1
+        );
+    }
+
+    #[test]
+    fn apply_proposal_marks_stale_on_conflict() {
+        let mut ctx = crate::ai::SharedAiCtx::with_sample_chapter(false);
+        let chapter_id = Uuid::from_u128(1);
+        let target_id = ctx.mutator.chapter_blocks(chapter_id).unwrap()[0].id;
+        let intent_id = Uuid::from_u128(20);
+        let now = chrono::Utc::now();
+        ctx.proposals.push(Proposal {
+            intent: AiIntent::ReplaceBlocks {
+                intent_id,
+                chapter_id,
+                target_ids: vec![target_id],
+                blocks: vec![crate::models::Block::new(
+                    BlockType::Narration,
+                    "改写后",
+                    now,
+                )],
+            },
+            stale: false,
+        });
+
+        // 用户侧已把目标块替换掉，原 target_id 不再存在
+        ctx.mutator
+            .apply(&AiIntent::ReplaceBlocks {
+                intent_id: Uuid::from_u128(21),
+                chapter_id,
+                target_ids: vec![target_id],
+                blocks: vec![crate::models::Block::new(
+                    BlockType::Narration,
+                    "用户已改",
+                    now,
+                )],
+            })
+            .unwrap();
+
+        let err = apply_proposal(intent_id, &mut ctx.proposals, &mut ctx.mutator).unwrap_err();
+        assert!(
+            err.to_string().contains("not found") || err.to_string().contains("stale"),
+            "unexpected error: {err}"
+        );
+        let leftover = ctx.proposals.get(intent_id).expect("proposal kept");
+        assert!(leftover.stale, "missing target must mark stale");
+    }
+
+    #[test]
+    fn discard_proposal_removes() {
+        let mut ctx = crate::ai::SharedAiCtx::with_sample_chapter(false);
+        let chapter_id = Uuid::from_u128(1);
+        let intent_id = Uuid::from_u128(30);
+        let initial_len = ctx.mutator.chapter_blocks(chapter_id).unwrap().len();
+        ctx.proposals.push(Proposal {
+            intent: AiIntent::CreateBlock {
+                intent_id,
+                chapter_id,
+                block_type: BlockType::Narration,
+                content: "不该落盘".into(),
+                speaker: None,
+                after_block_id: None,
+            },
+            stale: false,
+        });
+
+        discard_proposal(intent_id, &mut ctx.proposals).unwrap();
+
+        assert!(ctx.proposals.is_empty());
+        assert_eq!(
+            ctx.mutator.chapter_blocks(chapter_id).unwrap().len(),
+            initial_len
+        );
+    }
+
+    #[test]
+    fn apply_all_applies_queue() {
+        let mut ctx = crate::ai::SharedAiCtx::with_sample_chapter(false);
+        let chapter_id = Uuid::from_u128(1);
+        let initial_len = ctx.mutator.chapter_blocks(chapter_id).unwrap().len();
+        ctx.proposals.push(Proposal {
+            intent: AiIntent::CreateBlock {
+                intent_id: Uuid::from_u128(40),
+                chapter_id,
+                block_type: BlockType::Narration,
+                content: "A".into(),
+                speaker: None,
+                after_block_id: None,
+            },
+            stale: false,
+        });
+        ctx.proposals.push(Proposal {
+            intent: AiIntent::CreateBlock {
+                intent_id: Uuid::from_u128(41),
+                chapter_id,
+                block_type: BlockType::Narration,
+                content: "B".into(),
+                speaker: None,
+                after_block_id: None,
+            },
+            stale: false,
+        });
+
+        apply_all(&mut ctx.proposals, &mut ctx.mutator).unwrap();
+
+        assert!(ctx.proposals.is_empty());
+        assert_eq!(
+            ctx.mutator.chapter_blocks(chapter_id).unwrap().len(),
+            initial_len + 2
+        );
+    }
+
+    #[test]
+    fn discard_all_clears_queue() {
+        let mut store = ProposalStore::default();
+        store.push(Proposal {
+            intent: sample_create_block(),
+            stale: false,
+        });
+        store.push(Proposal {
+            intent: AiIntent::CreateBlock {
+                intent_id: Uuid::from_u128(50),
+                chapter_id: Uuid::nil(),
+                block_type: BlockType::Narration,
+                content: "x".into(),
+                speaker: None,
+                after_block_id: None,
+            },
+            stale: false,
+        });
+
+        discard_all(&mut store);
+
+        assert!(store.is_empty());
     }
 }

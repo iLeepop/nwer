@@ -7,7 +7,9 @@ mod provider;
 mod tools;
 
 pub use actions::action_prompt;
-pub use effect::{EffectPolicy, Proposal, ProposalStore};
+pub use effect::{
+    apply_all, apply_proposal, discard_all, discard_proposal, EffectPolicy, Proposal, ProposalStore,
+};
 pub use host::{format_lean_context, AiSessionHost, LeanContext, LeanFocus, LeanSelection};
 pub use intent::*;
 pub use mutator::{InMemoryMutator, ProjectMutator};
