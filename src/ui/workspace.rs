@@ -44,6 +44,7 @@ pub struct Workspace {
     pub(crate) speaker_input: Option<(usize, Entity<InputState>)>,
     pub(crate) character_input: Option<(usize, Entity<InputState>)>,
     pub(crate) search_input: Option<Entity<InputState>>,
+    pub(crate) ai_input: Option<Entity<InputState>>,
     pub(crate) outline_field_name_inputs: HashMap<String, Entity<InputState>>,
     pub(crate) outline_field_value_inputs: HashMap<String, Entity<TextareaState>>,
     _edit_subscriptions: Vec<Subscription>,
@@ -52,6 +53,7 @@ pub struct Workspace {
     _outline_subscriptions: Vec<Subscription>,
     debounce_gen: u64,
     _debounce_task: Option<Task<()>>,
+    _ai_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     keys_bound: bool,
 }
@@ -65,6 +67,7 @@ impl Workspace {
             speaker_input: None,
             character_input: None,
             search_input: None,
+            ai_input: None,
             outline_field_name_inputs: HashMap::new(),
             outline_field_value_inputs: HashMap::new(),
             _edit_subscriptions: Vec::new(),
@@ -73,6 +76,7 @@ impl Workspace {
             _outline_subscriptions: Vec::new(),
             debounce_gen: 0,
             _debounce_task: None,
+            _ai_task: None,
             focus_handle: cx.focus_handle(),
             keys_bound: false,
         }
@@ -135,6 +139,96 @@ impl Workspace {
             }
         }));
         self.search_input = Some(input);
+    }
+
+    pub(crate) fn ensure_ai_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_input.is_some() {
+            return;
+        }
+        self.ai_input = Some(cx.new(|cx| {
+            InputState::new(window, cx).placeholder("向 AI 提问或下达写作指令…")
+        }));
+    }
+
+    /// 从 AI 面板发送：校验配置 → hydrate → 后台跑 Host → 回写提案。
+    pub(crate) fn send_ai_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.ai.busy {
+            return;
+        }
+        self.ensure_ai_input(window, cx);
+        let Some(input) = self.ai_input.clone() else {
+            return;
+        };
+        let text = input.read(cx).value().to_string();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        if let Err(err) = crate::ai::validate_ai_ready(self.state.ai_settings()) {
+            self.state.ai_push_user_message(&text);
+            self.state.ai_fail_run(err);
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+            cx.notify();
+            return;
+        }
+
+        let settings = self.state.ai_settings().clone();
+        let lean = crate::ai::lean_context_from_app(&self.state);
+        let shared = crate::ai::hydrate_shared_ctx(&self.state);
+
+        self.state.ai_push_user_message(&text);
+        self.state.ai_mark_busy(true);
+        input.update(cx, |s, cx| s.set_value("", window, cx));
+        cx.notify();
+
+        self._ai_task = Some(cx.spawn(async move |this, cx| {
+            // GPUI background executor ≠ tokio；raiL/reqwest 需要独立 Runtime。
+            let run_result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_multi_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
+                        rt.block_on(async move {
+                            let llm = crate::ai::build_llm(&settings)?;
+                            let mut host =
+                                crate::ai::AiSessionHost::from_llm(llm, shared, lean);
+                            let reply =
+                                host.run(crate::ai::AiAction::Chat, &text).await?;
+                            let proposals = {
+                                let mut guard = host
+                                    .ctx
+                                    .lock()
+                                    .map_err(|_| anyhow::anyhow!("ai ctx poisoned"))?;
+                                std::mem::take(&mut guard.proposals)
+                            };
+                            anyhow::Ok((reply, proposals))
+                        })
+                    })
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("AI worker thread panicked")))
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match run_result {
+                    Ok((reply, proposals)) => {
+                        if let Err(err) =
+                            this.state
+                                .ai_ingest_host_result(reply, proposals, Utc::now())
+                        {
+                            this.state.ai_fail_run(err);
+                        }
+                    }
+                    Err(err) => this.state.ai_fail_run(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub(crate) fn ensure_outline_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {

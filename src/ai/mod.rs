@@ -1,4 +1,5 @@
 mod actions;
+mod bridge;
 mod effect;
 mod host;
 mod intent;
@@ -9,6 +10,10 @@ mod ui_state;
 mod workspace_mutator;
 
 pub use actions::action_prompt;
+pub use bridge::{
+    build_llm, chapter_context_from_app, hydrate_shared_ctx, lean_context_from_app,
+    provider_from_settings, validate_ai_ready,
+};
 pub use effect::{
     apply_all, apply_proposal, discard_all, discard_proposal, summarize_intent, EffectPolicy,
     Proposal, ProposalStore,

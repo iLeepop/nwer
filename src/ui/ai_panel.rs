@@ -2,7 +2,7 @@ use chrono::Utc;
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _, StyledExt, button::Button,
-    button::ButtonVariants as _, h_flex, v_flex,
+    button::ButtonVariants as _, h_flex, input::Input, v_flex,
 };
 
 use crate::ai::{summarize_intent, AiChatRole};
@@ -10,11 +10,14 @@ use crate::ui::Workspace;
 
 /// AI 助手面板：自动应用开关、消息流、提案确认、输入发送。
 pub fn render_ai_panel(
-    workspace: &Workspace,
-    _window: &mut Window,
+    workspace: &mut Workspace,
+    window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) -> impl IntoElement {
+    workspace.ensure_ai_input(window, cx);
+
     let auto_apply = workspace.state.ai.auto_apply;
+    let busy = workspace.state.ai.busy;
     let auto_label = if auto_apply {
         "自动应用：开"
     } else {
@@ -44,6 +47,7 @@ pub fn render_ai_panel(
         })
         .collect();
     let has_proposals = !proposals.is_empty();
+    let ai_input = workspace.ai_input.clone();
 
     v_flex()
         .id("ai-panel")
@@ -63,6 +67,7 @@ pub fn render_ai_panel(
                     Button::new("ai-auto-apply")
                         .small()
                         .label(auto_label)
+                        .disabled(busy)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.state.toggle_ai_auto_apply();
                             cx.notify();
@@ -88,7 +93,7 @@ pub fn render_ai_panel(
                     vec![div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("还没有对话。")
+                        .child("还没有对话。在下方输入后发送。")
                         .into_any_element()]
                 } else {
                     messages
@@ -139,6 +144,7 @@ pub fn render_ai_panel(
                                         Button::new(format!("ai-apply-{id}"))
                                             .xsmall()
                                             .label("应用")
+                                            .disabled(busy)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if let Err(err) =
                                                     this.state.ai_apply_proposal(id, Utc::now())
@@ -154,6 +160,7 @@ pub fn render_ai_panel(
                                             .ghost()
                                             .xsmall()
                                             .label("放弃")
+                                            .disabled(busy)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if let Err(err) =
                                                     this.state.ai_discard_proposal(id)
@@ -178,7 +185,7 @@ pub fn render_ai_panel(
                     Button::new("ai-apply-all")
                         .small()
                         .label("全部应用")
-                        .disabled(!has_proposals)
+                        .disabled(!has_proposals || busy)
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Err(err) = this.state.ai_apply_all_proposals(Utc::now()) {
                                 this.state.ai.status_message = Some(format!("{err:#}"));
@@ -191,7 +198,7 @@ pub fn render_ai_panel(
                         .ghost()
                         .small()
                         .label("全部放弃")
-                        .disabled(!has_proposals)
+                        .disabled(!has_proposals || busy)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.state.ai_discard_all_proposals();
                             cx.notify();
@@ -201,23 +208,28 @@ pub fn render_ai_panel(
         .child(
             h_flex()
                 .gap_2()
+                .items_center()
                 .child(
-                    div()
-                        .flex_1()
-                        .p_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .text_color(cx.theme().muted_foreground)
-                        .child("输入框（已禁用）"),
+                    div().flex_1().child(
+                        ai_input
+                            .map(|input| Input::new(&input).disabled(busy).into_any_element())
+                            .unwrap_or_else(|| {
+                                div()
+                                    .p_2()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("输入框加载中…")
+                                    .into_any_element()
+                            }),
+                    ),
                 )
                 .child(
                     Button::new("ai-send")
                         .small()
-                        .label("发送")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.ai_send_user_input("");
-                            cx.notify();
+                        .label(if busy { "…" } else { "发送" })
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.send_ai_prompt(window, cx);
                         })),
                 ),
         )

@@ -112,6 +112,19 @@ impl InMemoryMutator {
         self.scripts.insert(script.id, script);
     }
 
+    /// 用完整章节覆盖/写入内存（读工具 hydrate）。
+    pub fn upsert_chapter(&mut self, chapter: Chapter) {
+        self.chapters.insert(chapter.id, chapter);
+    }
+
+    pub fn get_chapter(&self, id: Uuid) -> Option<&Chapter> {
+        self.chapters.get(&id)
+    }
+
+    pub fn set_outline(&mut self, entries: Vec<OutlineEntry>) {
+        self.outline = entries;
+    }
+
     pub fn chapter_blocks(&self, id: Uuid) -> Option<&[Block]> {
         self.chapters.get(&id).map(|c| c.blocks.as_slice())
     }

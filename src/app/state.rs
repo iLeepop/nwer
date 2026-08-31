@@ -325,14 +325,58 @@ impl AppState {
         discard_all(&mut self.ai.proposals);
     }
 
-    /// 发送用户输入。v1 无 LLM 时明确提示未配置，不假装成功。
+    /// 发送用户输入。未配置时提示；已配置时由 Workspace 异步跑 Host（本方法仅作 stub/测试）。
     pub fn ai_send_user_input(&mut self, text: impl Into<String>) {
         let text = text.into();
         if !text.is_empty() {
-            self.ai_push_user_message(text);
+            self.ai_push_user_message(&text);
         }
-        self.ai_push_assistant("AI provider not configured");
-        self.ai.status_message = Some("AI 未配置".into());
+        if let Err(err) = crate::ai::validate_ai_ready(self.ai_settings()) {
+            self.ai_push_assistant(format!("{err:#}"));
+            self.ai.status_message = Some(err.to_string());
+            return;
+        }
+        // 已配置：真实发送由 Workspace::send_ai_prompt 异步完成。
+        self.ai.status_message = Some("请从面板发送以启动 Agent".into());
+    }
+
+    /// Host 跑完后合并提案；若自动应用则经 WorkspaceMutator 落盘。
+    pub fn ai_ingest_host_result(
+        &mut self,
+        reply: String,
+        mut proposals: crate::ai::ProposalStore,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.ai.busy = false;
+        self.ai_push_assistant(reply);
+        for id in proposals.intent_ids() {
+            if let Some(p) = proposals.remove(id) {
+                self.ai.proposals.push(p);
+            }
+        }
+        if self.ai.auto_apply && !self.ai.proposals.is_empty() {
+            self.ai_apply_all_proposals(now)?;
+            self.ai.status_message = Some("已自动应用提案".into());
+        } else if self.ai.proposals.is_empty() {
+            self.ai.status_message = None;
+        } else {
+            self.ai.status_message = Some(format!("有 {} 条提案待确认", self.ai.proposals.len()));
+        }
+        Ok(())
+    }
+
+    pub fn ai_mark_busy(&mut self, busy: bool) {
+        self.ai.busy = busy;
+        if busy {
+            self.ai.status_message = Some("思考中…".into());
+        }
+    }
+
+    pub fn ai_fail_run(&mut self, err: impl std::fmt::Display) {
+        self.ai.busy = false;
+        let msg = format!("{err:#}");
+        self.ai_push_assistant(format!("错误：{msg}"));
+        self.ai.status_message = Some(msg);
     }
 
     pub fn toggle_preview_panel(&mut self) {
@@ -1855,15 +1899,50 @@ mod tests {
                 .ai
                 .messages
                 .iter()
-                .any(|m| m.text.contains("AI provider not configured"))
+                .any(|m| m.text.contains("API Key") || m.text.contains("模型"))
                 || state
                     .ai
                     .status_message
                     .as_deref()
-                    .is_some_and(|s| s.contains("未配置") || s.contains("not configured")),
-            "must surface missing LLM, got messages={:?} status={:?}",
+                    .is_some_and(|s| s.contains("API Key") || s.contains("模型")),
+            "must surface missing LLM config, got messages={:?} status={:?}",
             state.ai.messages,
             state.ai.status_message
+        );
+    }
+
+    #[test]
+    fn ai_ingest_host_result_merges_proposals_and_clears_busy() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.ai.busy = true;
+        let chapter_id = Uuid::from_u128(1);
+        let intent_id = Uuid::from_u128(42);
+        let mut store = crate::ai::ProposalStore::default();
+        store.push(crate::ai::Proposal {
+            intent: crate::ai::AiIntent::CreateBlock {
+                intent_id,
+                chapter_id,
+                block_type: BlockType::Narration,
+                content: "提案段落".into(),
+                speaker: None,
+                after_block_id: None,
+            },
+            stale: false,
+        });
+
+        state
+            .ai_ingest_host_result("好的".into(), store, now())
+            .unwrap();
+
+        assert!(!state.ai.busy);
+        assert_eq!(state.ai.messages.last().unwrap().text, "好的");
+        assert_eq!(state.ai.proposals.len(), 1);
+        assert!(
+            state
+                .ai
+                .status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("1"))
         );
     }
 
