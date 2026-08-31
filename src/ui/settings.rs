@@ -219,21 +219,18 @@ impl Render for SettingsView {
 }
 
 /// 打开设置 Dialog（由 Workspace 委托）。
+///
+/// `root`/`depth`/`ai`/`has_project` 须由调用方在已持有 `&mut Workspace` 时取出：
+/// 本函数接收 `Context<Workspace>`，禁止再 `workspace.read(cx)`。
 pub(crate) fn open_settings_dialog(
     workspace: Entity<Workspace>,
+    root: String,
+    depth: String,
+    ai: AiSettings,
+    has_project: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let (root, depth, ai, has_project) = {
-        let this = workspace.read(cx);
-        (
-            this.state.config.projects_root.clone(),
-            this.state.max_depth().to_string(),
-            this.state.ai_settings().clone(),
-            this.state.project.is_some(),
-        )
-    };
-
     let settings = cx.new(|cx| SettingsView::new(root, depth, ai, has_project, window, cx));
 
     window.open_dialog(cx, move |dialog, _, _| {

@@ -495,8 +495,21 @@ impl Workspace {
     }
 
     pub(crate) fn prompt_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 已在 Workspace update 中：勿再 workspace.read(cx)。
+        let root = self.state.config.projects_root.clone();
+        let depth = self.state.max_depth().to_string();
+        let ai = self.state.ai_settings().clone();
+        let has_project = self.state.project.is_some();
         let workspace = cx.entity();
-        crate::ui::settings::open_settings_dialog(workspace, window, cx);
+        crate::ui::settings::open_settings_dialog(
+            workspace,
+            root,
+            depth,
+            ai,
+            has_project,
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn open_recent_at(&mut self, index: usize) -> anyhow::Result<()> {
