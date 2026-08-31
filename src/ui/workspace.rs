@@ -1748,7 +1748,7 @@ impl Render for Workspace {
                                     .visible(self.state.ui.ai_panel_open)
                                     .size(px(280.))
                                     .size_range(px(220.)..px(420.))
-                                    .child(ai_panel::render_ai_panel(&self.state, cx)),
+                                    .child(ai_panel::render_ai_panel(self, window, cx)),
                             ),
                     ),
             )

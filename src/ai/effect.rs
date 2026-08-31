@@ -5,13 +5,14 @@ use crate::ai::{AiIntent, IntentStatus, ToolReceipt};
 use super::mutator::ProjectMutator;
 
 /// 待用户确认或稍后应用的 AI 写意图。
+#[derive(Debug, Clone)]
 pub struct Proposal {
     pub intent: AiIntent,
     pub stale: bool,
 }
 
 /// 提案队列：`auto_apply` 关闭时由 EffectPolicy 写入。
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ProposalStore {
     proposals: Vec<Proposal>,
 }
@@ -58,6 +59,10 @@ impl ProposalStore {
 
     pub fn clear(&mut self) {
         self.proposals.clear();
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Proposal> {
+        self.proposals.iter()
     }
 }
 
@@ -165,7 +170,7 @@ impl EffectPolicy {
     }
 }
 
-fn summarize_intent(intent: &AiIntent) -> String {
+pub fn summarize_intent(intent: &AiIntent) -> String {
     match intent {
         AiIntent::CreateBlock { block_type, .. } => {
             let label = match block_type {

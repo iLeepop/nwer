@@ -15,6 +15,10 @@ use crate::services::{
     count_chapter, count_script, filter_chapter_tree_by_name, filter_outline_by_name,
     filter_script_tree_by_name, search_full_text, update_book_total,
 };
+use crate::ai::{
+    apply_all, apply_proposal, discard_all, discard_proposal, AiChatMessage, AiChatRole, AiIntent,
+    AiUiState, Proposal,
+};
 use crate::storage::{
     ChapterTreeNode, MoveDirection, RelPath, ScriptTreeNode, add_recent_project, copy_chapter,
     copy_script, create_chapter_file, create_directory, create_outline_entry, create_project,
@@ -127,6 +131,8 @@ pub struct AppState {
     pub script_focus: ScriptFocus,
     /// 多选相邻剧本块（合并用）。
     pub script_multi_select: Option<ScriptMultiSelect>,
+    /// AI 面板：自动应用、对话、提案队列。
+    pub ai: AiUiState,
 }
 
 impl AppState {
@@ -165,6 +171,7 @@ impl AppState {
             current_script_path: None,
             script_focus: ScriptFocus::Idle,
             script_multi_select: None,
+            ai: AiUiState::default(),
         })
     }
 
@@ -212,6 +219,58 @@ impl AppState {
     pub fn toggle_ai_panel(&mut self) {
         self.ui.ai_panel_open = !self.ui.ai_panel_open;
         let _ = self.persist_ui_state();
+    }
+
+    pub fn toggle_ai_auto_apply(&mut self) {
+        self.ai.auto_apply = !self.ai.auto_apply;
+    }
+
+    pub fn ai_push_user_message(&mut self, text: impl Into<String>) {
+        self.ai.messages.push(AiChatMessage {
+            role: AiChatRole::User,
+            text: text.into(),
+        });
+    }
+
+    pub fn ai_push_assistant(&mut self, text: impl Into<String>) {
+        self.ai.messages.push(AiChatMessage {
+            role: AiChatRole::Assistant,
+            text: text.into(),
+        });
+    }
+
+    pub fn ai_enqueue_proposal(&mut self, intent: AiIntent) {
+        self.ai.proposals.push(Proposal {
+            intent,
+            stale: false,
+        });
+    }
+
+    /// 经内存镜像应用提案。`now` 预留给落盘后刷新当前打开文档。
+    pub fn ai_apply_proposal(&mut self, intent_id: Uuid, _now: DateTime<Utc>) -> Result<()> {
+        apply_proposal(intent_id, &mut self.ai.proposals, &mut self.ai.mutator)
+    }
+
+    pub fn ai_discard_proposal(&mut self, intent_id: Uuid) -> Result<()> {
+        discard_proposal(intent_id, &mut self.ai.proposals)
+    }
+
+    pub fn ai_apply_all_proposals(&mut self, _now: DateTime<Utc>) -> Result<()> {
+        apply_all(&mut self.ai.proposals, &mut self.ai.mutator)
+    }
+
+    pub fn ai_discard_all_proposals(&mut self) {
+        discard_all(&mut self.ai.proposals);
+    }
+
+    /// 发送用户输入。v1 无 LLM 时明确提示未配置，不假装成功。
+    pub fn ai_send_user_input(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.is_empty() {
+            self.ai_push_user_message(text);
+        }
+        self.ai_push_assistant("AI provider not configured");
+        self.ai.status_message = Some("AI 未配置".into());
     }
 
     pub fn toggle_preview_panel(&mut self) {
@@ -1603,6 +1662,100 @@ mod tests {
         assert!(!state.ui.ai_panel_open);
         state.toggle_ai_panel();
         assert!(state.ui.ai_panel_open);
+    }
+
+    #[test]
+    fn ai_auto_apply_defaults_off() {
+        let (_dir, state) = state_with_temp_root();
+        assert!(!state.ai.auto_apply);
+        assert!(state.ai.proposals.is_empty());
+        assert!(!state.ai.busy);
+        assert!(state.ai.messages.is_empty());
+    }
+
+    #[test]
+    fn toggle_ai_auto_apply_flips() {
+        let (_dir, mut state) = state_with_temp_root();
+        assert!(!state.ai.auto_apply);
+        state.toggle_ai_auto_apply();
+        assert!(state.ai.auto_apply);
+        state.toggle_ai_auto_apply();
+        assert!(!state.ai.auto_apply);
+    }
+
+    #[test]
+    fn ai_apply_proposal_uses_in_memory_mutator() {
+        let (_dir, mut state) = state_with_temp_root();
+        let chapter_id = Uuid::from_u128(1);
+        state.ai.mutator.ensure_chapter(chapter_id, "第一章");
+        let intent_id = Uuid::from_u128(10);
+        state.ai_enqueue_proposal(crate::ai::AiIntent::CreateBlock {
+            intent_id,
+            chapter_id,
+            block_type: BlockType::Narration,
+            content: "新段落".into(),
+            speaker: None,
+            after_block_id: None,
+        });
+
+        state.ai_apply_proposal(intent_id, now()).unwrap();
+
+        assert!(state.ai.proposals.is_empty());
+        assert_eq!(
+            state.ai.mutator.chapter_blocks(chapter_id).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn ai_discard_proposal_removes_without_applying() {
+        let (_dir, mut state) = state_with_temp_root();
+        let chapter_id = Uuid::from_u128(1);
+        state.ai.mutator.ensure_chapter(chapter_id, "第一章");
+        let intent_id = Uuid::from_u128(11);
+        state.ai_enqueue_proposal(crate::ai::AiIntent::CreateBlock {
+            intent_id,
+            chapter_id,
+            block_type: BlockType::Narration,
+            content: "不该落盘".into(),
+            speaker: None,
+            after_block_id: None,
+        });
+
+        state.ai_discard_proposal(intent_id).unwrap();
+
+        assert!(state.ai.proposals.is_empty());
+        assert!(
+            state
+                .ai
+                .mutator
+                .chapter_blocks(chapter_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ai_send_without_llm_does_not_pretend_success() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.ai_send_user_input("写一段叙述");
+
+        assert_eq!(state.ai.messages[0].text, "写一段叙述");
+        assert!(
+            state
+                .ai
+                .messages
+                .iter()
+                .any(|m| m.text.contains("AI provider not configured"))
+                || state
+                    .ai
+                    .status_message
+                    .as_deref()
+                    .is_some_and(|s| s.contains("未配置") || s.contains("not configured")),
+            "must surface missing LLM, got messages={:?} status={:?}",
+            state.ai.messages,
+            state.ai.status_message
+        );
     }
 
     #[test]
