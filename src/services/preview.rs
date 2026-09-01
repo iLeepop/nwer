@@ -20,21 +20,66 @@ fn chapter_block_preview_line(block: &Block) -> Option<String> {
     Some(format!("　　{text}"))
 }
 
-/// 剧本预览行：带类型前缀（如「场景描述：」「张三说：」）。
+/// 剧本预览行：带类型前缀；音乐/氛围用「N开始 / N结束」标记区间。
 pub fn script_preview_lines(script: &ScriptDoc) -> Vec<String> {
+    let mut music_n = 0usize;
+    let mut mood_n = 0usize;
+    // (start, end, kind, ordinal, content)
+    let mut spans: Vec<(usize, usize, &'static str, usize, String)> = Vec::new();
+    for (i, block) in script.blocks.iter().enumerate() {
+        if block.content.is_empty() || !block.block_type.is_span_cue() {
+            continue;
+        }
+        let end = script.resolved_span_end_index(i).unwrap_or(i);
+        let (kind, n) = match block.block_type {
+            ScriptBlockType::Music => {
+                music_n += 1;
+                ("音乐", music_n)
+            }
+            ScriptBlockType::Mood => {
+                mood_n += 1;
+                ("氛围", mood_n)
+            }
+            _ => continue,
+        };
+        spans.push((i, end, kind, n, block.content.clone()));
+    }
+
+    let mut ends_by_index: Vec<Vec<(usize, &'static str, usize)>> =
+        vec![Vec::new(); script.blocks.len()];
+    for (start, end, kind, n, _) in &spans {
+        if *end < ends_by_index.len() {
+            ends_by_index[*end].push((*start, *kind, *n));
+        }
+    }
+    // 同一结束位：先开始的后结束（嵌套时外层后关）
+    for list in &mut ends_by_index {
+        list.sort_by(|a, b| b.0.cmp(&a.0));
+    }
+
+    let span_start: std::collections::HashMap<usize, (usize, &'static str, usize, String)> = spans
+        .into_iter()
+        .map(|(i, _end, kind, n, content)| (i, (i, kind, n, content)))
+        .collect();
+
     let mut last_character: Option<String> = None;
     let mut lines = Vec::new();
     for (index, block) in script.blocks.iter().enumerate() {
-        if let Some(line) = script_block_preview_line(script, index, block, &mut last_character) {
+        if let Some((_, kind, n, content)) = span_start.get(&index) {
+            lines.push(format!("{kind}{n}开始：{content}"));
+        } else if let Some(line) =
+            script_block_preview_line(block, &mut last_character)
+        {
             lines.push(line);
+        }
+        for (_, kind, n) in &ends_by_index[index] {
+            lines.push(format!("{kind}{n}结束"));
         }
     }
     lines
 }
 
 fn script_block_preview_line(
-    script: &ScriptDoc,
-    index: usize,
     block: &ScriptBlock,
     last_character: &mut Option<String>,
 ) -> Option<String> {
@@ -91,35 +136,15 @@ fn script_block_preview_line(
             }
             Some(format!("镜头：{}", block.content))
         }
-        ScriptBlockType::Music => {
-            if block.content.is_empty() {
-                return None;
-            }
-            let end = script.resolved_span_end_index(index).unwrap_or(index);
-            Some(format!(
-                "音乐：{} （覆盖：块#{}–#{}）",
-                block.content,
-                index + 1,
-                end + 1
-            ))
+        ScriptBlockType::Music | ScriptBlockType::Mood => {
+            // 由 script_preview_lines 以开始/结束标记输出
+            None
         }
         ScriptBlockType::Sfx => {
             if block.content.is_empty() {
                 return None;
             }
             Some(format!("音效：{}", block.content))
-        }
-        ScriptBlockType::Mood => {
-            if block.content.is_empty() {
-                return None;
-            }
-            let end = script.resolved_span_end_index(index).unwrap_or(index);
-            Some(format!(
-                "氛围：{} （覆盖：块#{}–#{}）",
-                block.content,
-                index + 1,
-                end + 1
-            ))
         }
         ScriptBlockType::Note => {
             if block.content.is_empty() {
@@ -161,6 +186,25 @@ mod tests {
             vec![
                 "场景描述：张三进门。".to_string(),
                 "张三说：你好。".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn script_preview_span_cues_use_start_end_markers() {
+        let mut script = ScriptDoc::new("测", now());
+        let music = ScriptBlock::new(ScriptBlockType::Music, "低沉 BGM", now());
+        let action = ScriptBlock::new(ScriptBlockType::Action, "雨下个不停。", now());
+        let scene = ScriptBlock::new(ScriptBlockType::SceneHeading, "INT. 二", now());
+        script.blocks = vec![music, action, scene];
+        let lines = script_preview_lines(&script);
+        assert_eq!(
+            lines,
+            vec![
+                "音乐1开始：低沉 BGM".to_string(),
+                "场景描述：雨下个不停。".to_string(),
+                "音乐1结束".to_string(),
+                "场景：INT. 二".to_string(),
             ]
         );
     }
