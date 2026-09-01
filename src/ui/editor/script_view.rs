@@ -166,13 +166,15 @@ pub fn script_container_style(
     let editing = matches!(focus, ScriptFocus::Editing { index: i } if *i == index);
     let border = if editing {
         cx.theme().accent
-    } else {
+    } else if selected {
         cx.theme().border
-    };
-    let bg = if editing || selected {
-        cx.theme().background
     } else {
-        cx.theme().muted
+        cx.theme().border.opacity(0.0)
+    };
+    let bg = if selected && !editing {
+        cx.theme().muted.opacity(0.45)
+    } else {
+        cx.theme().background
     };
     (border, bg)
 }

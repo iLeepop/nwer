@@ -4,6 +4,7 @@ mod effect;
 mod host;
 mod intent;
 mod mutator;
+mod prompts;
 mod provider;
 mod tools;
 mod ui_command;
@@ -20,11 +21,14 @@ pub use effect::{
     Proposal, ProposalStore,
 };
 pub use ui_command::AiUiCommand;
-pub use ui_state::{AiChatMessage, AiChatRole, AiMaxTokenTier, AiUiState};
+pub use ui_state::{AiAgentKind, AiChatMessage, AiChatRole, AiMaxTokenTier, AiUiState};
 pub use host::{format_lean_context, AiSessionHost, LeanContext, LeanFocus, LeanSelection};
 pub use intent::*;
 pub use mutator::{InMemoryMutator, ProjectMutator};
 pub use workspace_mutator::WorkspaceMutator;
+pub use prompts::{
+    compose_system_prompt, SYSTEM_DIRECTOR_PROMPT, SYSTEM_REVIEWER_PROMPT, SYSTEM_WRITER_PROMPT,
+};
 pub use provider::{
     AiAction, AiProvider, AiRequest, AiResponse, ChapterContext, ProjectContext, StubAiProvider,
 };

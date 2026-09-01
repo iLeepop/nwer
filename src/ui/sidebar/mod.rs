@@ -99,7 +99,7 @@ pub fn render_sidebar(
                 .gap_1()
                 .p_1()
                 .rounded_md()
-                .bg(cx.theme().muted)
+                .bg(cx.theme().muted.opacity(0.55))
                 .child(if is_full_text {
                     render_full_text_hits(workspace, cx).into_any_element()
                 } else {

@@ -56,6 +56,15 @@ pub struct AiContext {
     pub style_guide: String,
     #[serde(default)]
     pub synopsis: String,
+    /// 项目「写手」角色追加提示词（系统写手段之后）。
+    #[serde(default)]
+    pub writer_prompt: String,
+    /// 项目「审查」角色追加提示词。
+    #[serde(default)]
+    pub reviewer_prompt: String,
+    /// 项目「导演」角色追加提示词。
+    #[serde(default)]
+    pub director_prompt: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,5 +149,25 @@ mod tests {
         assert_eq!(project.ui_state.sidebar_tab, "chapters");
         assert_eq!(project.total_word_count, 0);
         assert!(project.last_opened_chapter.is_none());
+    }
+
+    #[test]
+    fn ai_context_missing_role_prompts_deserializes_empty() {
+        let json = r#"{
+            "schema_version": 1,
+            "id": "0198f86d-55be-7000-8000-000000000001",
+            "title": "旧项目",
+            "created_at": "2026-08-29T08:00:00Z",
+            "updated_at": "2026-08-29T08:00:00Z",
+            "total_word_count": 0,
+            "settings": { "max_depth": 3, "word_count_exclude_types": ["note", "scene_break"] },
+            "ui_state": {},
+            "ai_context": { "style_guide": "古风", "synopsis": "简介" }
+        }"#;
+        let parsed: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.ai_context.style_guide, "古风");
+        assert!(parsed.ai_context.writer_prompt.is_empty());
+        assert!(parsed.ai_context.reviewer_prompt.is_empty());
+        assert!(parsed.ai_context.director_prompt.is_empty());
     }
 }

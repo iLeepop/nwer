@@ -25,6 +25,15 @@ impl ScriptFocus {
         matches!(self, ScriptFocus::Editing { .. })
     }
 
+    pub fn is_editing_index(&self, index: usize) -> bool {
+        matches!(self, ScriptFocus::Editing { index: i } if *i == index)
+    }
+
+    /// 已在编辑同一块时不应重建输入（打断框选 / 角色字段焦点）。
+    pub fn should_rebuild_editor_on_press(&self, index: usize) -> bool {
+        !self.is_editing_index(index)
+    }
+
     /// 单击块：直接进入编辑。
     pub fn click_block(self, index: usize) -> Self {
         ScriptFocus::Editing { index }
@@ -111,5 +120,12 @@ mod tests {
             ScriptFocus::Selected { index: 1 }
         );
         assert_eq!(ScriptFocus::Selected { index: 1 }.escape(), ScriptFocus::Idle);
+    }
+
+    #[test]
+    fn rebuild_editor_skipped_while_editing_same_block() {
+        let editing = ScriptFocus::Editing { index: 1 };
+        assert!(!editing.should_rebuild_editor_on_press(1));
+        assert!(editing.should_rebuild_editor_on_press(0));
     }
 }

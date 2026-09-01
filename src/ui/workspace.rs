@@ -3,8 +3,9 @@ use std::time::Duration;
 use chrono::Utc;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IndexPath, Root, Sizable as _, StyledExt, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IndexPath, Root, Sizable as _, WindowExt as _,
     button::Button,
+    button::ButtonVariants as _,
     dialog::DialogButtonProps,
     h_flex,
     input::Input,
@@ -199,6 +200,11 @@ impl Workspace {
         let settings = self.state.ai_settings().clone();
         let lean = crate::ai::lean_context_from_app(&self.state);
         let shared = crate::ai::hydrate_shared_ctx(&self.state);
+        let system_prompt = crate::ai::compose_system_prompt(
+            self.state.ai.agent,
+            self.state.project.as_ref().map(|p| &p.ai_context),
+            rai_l::agent::agent::FunctionCallAgent::<rai_l::llm::RaiLLM>::DEFAULT_SYSTEM_PROMPT,
+        );
         let max_tokens = crate::ai::resolve_max_tokens(
             self.state.ai.max_token_tier,
             &settings.provider,
@@ -234,7 +240,8 @@ impl Workspace {
                         .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
                     rt.block_on(async move {
                         let llm = crate::ai::build_llm(&settings)?;
-                        let mut host = crate::ai::AiSessionHost::from_llm(llm, shared, lean);
+                        let mut host = crate::ai::AiSessionHost::from_llm(llm, shared, lean)
+                            .with_system_prompt(system_prompt);
                         let tx_delta = tx;
                         let reply = host
                             .run_stream(
@@ -682,6 +689,12 @@ impl Workspace {
         let root = self.state.config.projects_root.clone();
         let depth = self.state.max_depth().to_string();
         let ai = self.state.ai_settings().clone();
+        let project_ai = self
+            .state
+            .project
+            .as_ref()
+            .map(|p| p.ai_context.clone())
+            .unwrap_or_default();
         let has_project = self.state.project.is_some();
         let workspace = cx.entity();
         crate::ui::settings::open_settings_dialog(
@@ -689,6 +702,7 @@ impl Workspace {
             root,
             depth,
             ai,
+            project_ai,
             has_project,
             window,
             cx,
@@ -1816,38 +1830,37 @@ impl Render for Workspace {
                                 let editor_core = v_flex()
                                     .id("editor-pane")
                                     .size_full()
-                                    .p_4()
-                                    .gap_3()
-                                    .child(if let Some(input) = self.title_input.as_ref() {
-                                        div()
-                                            .w_full()
-                                            .child(Input::new(input).into_any_element())
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .text_lg()
-                                            .font_bold()
-                                            .child(editor_title)
-                                            .into_any_element()
-                                    })
+                                    .px_6()
+                                    .pt_4()
+                                    .pb_2()
+                                    .gap_2()
                                     .child(
                                         h_flex()
+                                            .w_full()
+                                            .items_center()
                                             .gap_2()
                                             .child(
-                                                Button::new("save-now")
-                                                    .small()
-                                                    .label("保存")
-                                                    .disabled(
-                                                        self.state.current_chapter.is_none()
-                                                            && self.state.current_script.is_none()
-                                                            && self.state.current_outline.is_none(),
-                                                    )
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.save_document(cx);
-                                                    })),
+                                                div()
+                                                    .flex_1()
+                                                    .max_w(px(
+                                                        crate::ui::manuscript::MANUSCRIPT_MEASURE_PX,
+                                                    ))
+                                                    .child(if let Some(input) =
+                                                        self.title_input.as_ref()
+                                                    {
+                                                        Input::new(input).into_any_element()
+                                                    } else {
+                                                        div()
+                                                            .text_lg()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child(editor_title)
+                                                            .into_any_element()
+                                                    }),
                                             )
+                                            .child(div().flex_1())
                                             .child(
                                                 Button::new("toggle-preview")
+                                                    .ghost()
                                                     .small()
                                                     .label(preview_label)
                                                     .disabled(!has_doc)
@@ -1855,14 +1868,6 @@ impl Render for Workspace {
                                                         this.state.toggle_preview_panel();
                                                         cx.notify();
                                                     })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(
-                                                        "提示：Enter 分割 · Shift+Enter 块内换行 · Cmd/Ctrl+S 保存",
-                                                    ),
                                             ),
                                     )
                                     .child(if self.state.current_script.is_some() {
@@ -1897,8 +1902,8 @@ impl Render for Workspace {
                             .child(
                                 resizable_panel()
                                     .visible(self.state.ui.ai_panel_open)
-                                    .size(px(280.))
-                                    .size_range(px(220.)..px(420.))
+                                    .size(px(260.))
+                                    .size_range(px(200.)..px(400.))
                                     .child(ai_panel::render_ai_panel(self, window, cx)),
                             ),
                     ),

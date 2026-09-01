@@ -177,6 +177,7 @@ pub fn preview_text(block: &Block) -> String {
 }
 
 pub fn block_container_style(
+    block_type: BlockType,
     focus: &BlockFocus,
     index: usize,
     multi: Option<&crate::models::BlockMultiSelect>,
@@ -185,15 +186,21 @@ pub fn block_container_style(
     let in_multi = multi.is_some_and(|m| m.contains(index));
     let selected = focus.selected_index() == Some(index) || in_multi;
     let editing = matches!(focus, BlockFocus::Editing { index: i } if *i == index);
-    let border = if editing {
+    let voice = crate::ui::manuscript::block_voice(block_type);
+    let surface = crate::ui::manuscript::block_surface(voice, editing, selected);
+    let border = if surface.emphasize_border {
         cx.theme().accent
-    } else {
+    } else if selected {
         cx.theme().border
-    };
-    let bg = if editing || selected {
-        cx.theme().background
     } else {
+        cx.theme().border.opacity(0.0)
+    };
+    let bg = if surface.fill_muted {
         cx.theme().muted
+    } else if selected && !editing {
+        cx.theme().muted.opacity(0.45)
+    } else {
+        cx.theme().background
     };
     (border, bg)
 }

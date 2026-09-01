@@ -2,7 +2,7 @@ use chrono::Utc;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt, button::Button,
+    ActiveTheme as _, Disableable as _, Sizable as _, button::Button,
     button::ButtonVariants as _, h_flex, input::Textarea, menu::DropdownMenu as _,
     menu::PopupMenuItem, v_flex,
 };
@@ -25,6 +25,7 @@ pub fn render_ai_panel(
     let auto_apply = workspace.state.ai.auto_apply;
     let busy = workspace.state.ai.busy;
     let max_token_tier = workspace.state.ai.max_token_tier;
+    let agent = workspace.state.ai.agent;
     let proposals_expanded = workspace.state.ai.proposals_expanded;
     let status = workspace.state.ai.status_message.clone();
     let messages: Vec<(AiChatRole, String)> = workspace
@@ -58,6 +59,7 @@ pub fn render_ai_panel(
         "始终询问"
     };
     let tier_label = max_token_tier.label();
+    let agent_label = agent.label();
 
     v_flex()
         .id("ai-panel")
@@ -70,9 +72,15 @@ pub fn render_ai_panel(
                 .w_full()
                 .items_center()
                 .px_3()
-                .pt_3()
+                .pt_2()
                 .pb_1()
-                .child(div().font_bold().child("AI 助手")),
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(cx.theme().muted_foreground)
+                        .child("助手"),
+                ),
         )
         .children(status.map(|msg| {
             div()
@@ -120,9 +128,11 @@ pub fn render_ai_panel(
                     proposals,
                     policy_label,
                     tier_label,
+                    agent_label,
                     busy,
                     auto_apply,
                     max_token_tier,
+                    agent,
                     cx,
                 )),
         )
@@ -168,9 +178,11 @@ fn render_input_dock(
     proposals: Vec<(uuid::Uuid, String, bool)>,
     policy_label: &'static str,
     tier_label: &'static str,
+    agent_label: &'static str,
     busy: bool,
     auto_apply: bool,
     max_token_tier: AiMaxTokenTier,
+    agent: crate::ai::AiAgentKind,
     cx: &mut Context<'_, Workspace>,
 ) -> impl IntoElement {
     div()
@@ -223,9 +235,11 @@ fn render_input_dock(
                 .child(render_toolbar(
                     policy_label,
                     tier_label,
+                    agent_label,
                     busy,
                     auto_apply,
                     max_token_tier,
+                    agent,
                     cx,
                 )),
         )
@@ -234,9 +248,11 @@ fn render_input_dock(
 fn render_toolbar(
     policy_label: &'static str,
     tier_label: &'static str,
+    agent_label: &'static str,
     busy: bool,
     auto_apply: bool,
     max_token_tier: AiMaxTokenTier,
+    agent: crate::ai::AiAgentKind,
     cx: &mut Context<'_, Workspace>,
 ) -> impl IntoElement {
     let workspace = cx.entity();
@@ -307,6 +323,33 @@ fn render_toolbar(
                 }),
         )
         .child(div().flex_1())
+        .child(
+            Button::new("ai-agent")
+                .xsmall()
+                .label(agent_label)
+                .disabled(busy)
+                .dropdown_menu({
+                    let workspace = workspace.clone();
+                    move |menu, _, _| {
+                        let mut menu = menu;
+                        for kind in crate::ai::AiAgentKind::all() {
+                            let workspace = workspace.clone();
+                            let mark = if agent == kind { " ✓" } else { "" };
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{}{mark}", kind.label())).on_click(
+                                    move |_, _, cx| {
+                                        workspace.update(cx, |this, cx| {
+                                            this.state.set_ai_agent(kind);
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    }
+                }),
+        )
         .child(
             Button::new("ai-send")
                 .small()

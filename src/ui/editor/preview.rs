@@ -22,8 +22,9 @@ pub fn render_preview_panel(
 
     let mut children: Vec<AnyElement> = vec![
         div()
-            .text_sm()
-            .font_weight(FontWeight::BOLD)
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(cx.theme().muted_foreground)
             .child("预览")
             .into_any_element(),
     ];
@@ -41,7 +42,8 @@ pub fn render_preview_panel(
         children.push(
             selectable_plain("preview-body", body)
                 .text_sm()
-                .line_height(relative(1.7))
+                .line_height(relative(1.75))
+                .text_color(cx.theme().foreground)
                 .into_any_element(),
         );
     }
@@ -49,8 +51,9 @@ pub fn render_preview_panel(
     v_flex()
         .id("preview-panel")
         .size_full()
-        .p_3()
-        .gap_2()
+        .px_4()
+        .py_3()
+        .gap_3()
         .bg(cx.theme().background)
         .border_l_1()
         .border_color(cx.theme().border)

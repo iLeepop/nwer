@@ -1,6 +1,7 @@
 mod ai_panel;
 mod dialog_footer;
 pub mod editor;
+pub(crate) mod manuscript;
 mod selectable_text;
 mod settings;
 mod sidebar;

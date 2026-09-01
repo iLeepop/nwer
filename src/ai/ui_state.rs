@@ -37,12 +37,39 @@ impl AiMaxTokenTier {
     }
 }
 
+/// 会话级 Agent 角色（不持久化；重启默认 Default）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiAgentKind {
+    #[default]
+    Default,
+    Writer,
+    Reviewer,
+    Director,
+}
+
+impl AiAgentKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认",
+            Self::Writer => "写手",
+            Self::Reviewer => "审查",
+            Self::Director => "导演",
+        }
+    }
+
+    pub fn all() -> [Self; 4] {
+        [Self::Default, Self::Writer, Self::Reviewer, Self::Director]
+    }
+}
+
 /// AI 面板会话状态（不持久化）。
 #[derive(Debug, Clone)]
 pub struct AiUiState {
     pub auto_apply: bool,
     /// 输出长度档位：自动 / 低 / 高。
     pub max_token_tier: AiMaxTokenTier,
+    /// 当前 Agent 角色。
+    pub agent: AiAgentKind,
     pub messages: Vec<AiChatMessage>,
     pub proposals: ProposalStore,
     /// 提案列表是否展开（顶栏始终可见；默认展开）。
@@ -60,6 +87,7 @@ impl Default for AiUiState {
         Self {
             auto_apply: false,
             max_token_tier: AiMaxTokenTier::Auto,
+            agent: AiAgentKind::Default,
             messages: Vec::new(),
             proposals: ProposalStore::default(),
             proposals_expanded: true,

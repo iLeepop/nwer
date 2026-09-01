@@ -241,6 +241,10 @@ impl AppState {
         self.ai.max_token_tier = tier;
     }
 
+    pub fn set_ai_agent(&mut self, agent: crate::ai::AiAgentKind) {
+        self.ai.agent = agent;
+    }
+
     pub fn ai_push_user_message(&mut self, text: impl Into<String>) {
         self.ai.messages.push(AiChatMessage {
             role: AiChatRole::User,
@@ -528,6 +532,22 @@ impl AppState {
     pub fn set_max_depth(&mut self, max_depth: u32, now: DateTime<Utc>) -> Result<()> {
         let project = self.project.as_mut().context("no project open")?;
         project.settings.max_depth = max_depth.max(1);
+        project.updated_at = now;
+        self.persist_project()
+    }
+
+    /// 更新当前项目角色提示词并落盘。
+    pub fn set_project_role_prompts(
+        &mut self,
+        writer_prompt: impl Into<String>,
+        reviewer_prompt: impl Into<String>,
+        director_prompt: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let project = self.project.as_mut().context("no project open")?;
+        project.ai_context.writer_prompt = writer_prompt.into();
+        project.ai_context.reviewer_prompt = reviewer_prompt.into();
+        project.ai_context.director_prompt = director_prompt.into();
         project.updated_at = now;
         self.persist_project()
     }
@@ -2060,6 +2080,16 @@ mod tests {
     }
 
     #[test]
+    fn set_ai_agent_updates_session_state() {
+        let (_dir, mut state) = state_with_temp_root();
+        assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Default);
+        state.set_ai_agent(crate::ai::AiAgentKind::Writer);
+        assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Writer);
+        state.set_ai_agent(crate::ai::AiAgentKind::Director);
+        assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Director);
+    }
+
+    #[test]
     fn toggle_ai_auto_apply_flips() {
         let (_dir, mut state) = state_with_temp_root();
         assert!(!state.ai.auto_apply);
@@ -2546,6 +2576,24 @@ mod tests {
         assert_eq!(state.project.as_ref().unwrap().settings.max_depth, 5);
         let loaded = load_project(state.project_dir.as_ref().unwrap()).unwrap();
         assert_eq!(loaded.settings.max_depth, 5);
+    }
+
+    #[test]
+    fn set_project_role_prompts_persists() {
+        let (_dir, mut state) = state_with_temp_root();
+        state
+            .new_project("提示词项目", now())
+            .expect("new project");
+        state
+            .set_project_role_prompts("写手段", "审查段", "导演段", now())
+            .unwrap();
+        let ctx = &state.project.as_ref().unwrap().ai_context;
+        assert_eq!(ctx.writer_prompt, "写手段");
+        assert_eq!(ctx.reviewer_prompt, "审查段");
+        assert_eq!(ctx.director_prompt, "导演段");
+        let loaded = load_project(state.project_dir.as_ref().unwrap()).unwrap();
+        assert_eq!(loaded.ai_context.writer_prompt, "写手段");
+        assert_eq!(loaded.ai_context.director_prompt, "导演段");
     }
 
     #[test]

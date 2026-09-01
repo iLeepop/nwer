@@ -25,6 +25,18 @@ impl BlockFocus {
         matches!(self, BlockFocus::Editing { .. })
     }
 
+    /// 是否正在编辑指定下标的块。
+    pub fn is_editing_index(&self, index: usize) -> bool {
+        matches!(self, BlockFocus::Editing { index: i } if *i == index)
+    }
+
+    /// 块行 mousedown：已在编辑同一块时不应重建输入框。
+    ///
+    /// 重建会打断 Textarea 框选，并抢走说话人 Input 的焦点。
+    pub fn should_rebuild_editor_on_press(&self, index: usize) -> bool {
+        !self.is_editing_index(index)
+    }
+
     /// 单击块：直接进入编辑。
     pub fn click_block(self, index: usize) -> Self {
         BlockFocus::Editing { index }
@@ -115,6 +127,15 @@ mod tests {
             BlockFocus::Editing { index: 1 }.click_block(1),
             BlockFocus::Editing { index: 1 }
         );
+    }
+
+    #[test]
+    fn rebuild_editor_skipped_while_editing_same_block() {
+        let editing = BlockFocus::Editing { index: 2 };
+        assert!(!editing.should_rebuild_editor_on_press(2));
+        assert!(editing.should_rebuild_editor_on_press(3));
+        assert!(BlockFocus::Idle.should_rebuild_editor_on_press(0));
+        assert!(BlockFocus::Selected { index: 2 }.should_rebuild_editor_on_press(2));
     }
 
     #[test]

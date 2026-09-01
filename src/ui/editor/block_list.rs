@@ -1,4 +1,4 @@
-//! 段落块列表：紧凑布局、单击编辑、拖拽排序。
+//! 段落块列表：稿面栏宽、类型声部、单击编辑、拖拽排序。
 
 use chrono::Utc;
 use gpui::prelude::FluentBuilder;
@@ -8,6 +8,9 @@ use gpui_component::{
 };
 
 use crate::models::{BlockFocus, BlockType};
+use crate::ui::manuscript::{
+    TextEmphasis, MANUSCRIPT_MEASURE_PX, block_voice,
+};
 use crate::ui::Workspace;
 use crate::ui::editor::block_view::{
     DragBlock, block_container_style, preview_text, render_block_menu, render_drag_handle,
@@ -42,11 +45,9 @@ pub fn render_block_list(
         return v_flex()
             .id("block-list-empty")
             .flex_1()
-            .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().muted)
+            .w_full()
+            .items_center()
+            .justify_center()
             .child(
                 div()
                     .text_sm()
@@ -63,13 +64,20 @@ pub fn render_block_list(
     let mut children: Vec<AnyElement> = Vec::new();
 
     for (index, block) in blocks.iter().enumerate() {
-        let (border, bg) = block_container_style(&focus, index, multi.as_ref(), cx);
+        let voice = block_voice(block.block_type);
+        let (border, bg) =
+            block_container_style(block.block_type, &focus, index, multi.as_ref(), cx);
         let editing = matches!(focus, BlockFocus::Editing { index: i } if i == index);
         let allows_speaker = block.block_type.allows_speaker();
         let speaker_label = if block.block_type == BlockType::Thought {
             "人物"
         } else {
             "说话人"
+        };
+        let body_color = match voice.emphasis {
+            TextEmphasis::Primary => cx.theme().foreground,
+            TextEmphasis::Soft => cx.theme().muted_foreground,
+            TextEmphasis::Muted => cx.theme().muted_foreground,
         };
 
         let body = if editing {
@@ -80,6 +88,8 @@ pub fn render_block_list(
             {
                 v_flex()
                     .gap_1()
+                    .pl(px(voice.content_indent_px))
+                    .when(voice.center, |this| this.items_center())
                     .when(allows_speaker, |this| {
                         let speaker = workspace
                             .speaker_input
@@ -88,15 +98,22 @@ pub fn render_block_list(
                             .map(|(_, s)| s.clone());
                         this.child(if let Some(speaker) = speaker {
                             h_flex()
+                                .w_full()
                                 .gap_2()
                                 .items_center()
                                 .child(
                                     div()
                                         .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
                                         .text_color(cx.theme().muted_foreground)
                                         .child(speaker_label),
                                 )
-                                .child(Input::new(&speaker))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Input::new(&speaker)),
+                                )
                                 .into_any_element()
                         } else {
                             div().into_any_element()
@@ -113,23 +130,33 @@ pub fn render_block_list(
         } else {
             v_flex()
                 .gap_0p5()
+                .pl(px(voice.content_indent_px))
+                .when(voice.center, |this| this.items_center())
                 .when(allows_speaker, |this| {
                     this.child(
                         div()
                             .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "{speaker_label}：{}",
+                                "{}",
                                 block.speaker.as_deref().unwrap_or("（未设置）")
                             )),
                     )
                 })
-                .child(
-                    div()
+                .child({
+                    let mut el = div()
                         .text_sm()
-                        .line_height(relative(1.55))
-                        .child(preview_text(block)),
-                )
+                        .line_height(relative(1.65))
+                        .text_color(body_color);
+                    if voice.italic {
+                        el = el.italic();
+                    }
+                    if voice.center {
+                        el = el.text_center();
+                    }
+                    el.child(preview_text(block))
+                })
                 .into_any_element()
         };
 
@@ -139,7 +166,7 @@ pub fn render_block_list(
                 .id(SharedString::from(format!("block-{index}")))
                 .relative()
                 .w_full()
-                .py_1()
+                .py_1p5()
                 .pl_7()
                 .pr_8()
                 .rounded_md()
@@ -158,6 +185,11 @@ pub fn render_block_list(
                             this.invalidate_editor_inputs();
                             cx.stop_propagation();
                             cx.notify();
+                            return;
+                        }
+                        // 已在编辑同一块：放行给 Textarea / speaker Input，避免重建打断框选与焦点。
+                        if !this.state.block_focus.should_rebuild_editor_on_press(index) {
+                            cx.stop_propagation();
                             return;
                         }
                         this.state.click_block(index);
@@ -231,12 +263,8 @@ pub fn render_block_list(
     v_flex()
         .id("block-list")
         .flex_1()
-        .gap_1()
-        .p_2()
-        .rounded_md()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted)
+        .w_full()
+        .items_center()
         .overflow_y_scroll()
         .on_mouse_down(
             MouseButton::Left,
@@ -246,6 +274,15 @@ pub fn render_block_list(
                 cx.notify();
             }),
         )
-        .children(children)
+        .child(
+            v_flex()
+                .id("block-list-measure")
+                .w_full()
+                .max_w(px(MANUSCRIPT_MEASURE_PX))
+                .gap_0p5()
+                .px_2()
+                .py_1()
+                .children(children),
+        )
         .into_any_element()
 }

@@ -8,6 +8,7 @@ use gpui_component::{
 };
 
 use crate::models::{ScriptBlockType, ScriptFocus};
+use crate::ui::manuscript::MANUSCRIPT_MEASURE_PX;
 use crate::ui::Workspace;
 use crate::ui::editor::script_view::{
     DragScriptBlock, preview_text, render_script_drag_handle, render_script_menu,
@@ -23,11 +24,9 @@ pub fn render_script_list(
         return v_flex()
             .id("script-list-empty")
             .flex_1()
-            .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().muted)
+            .w_full()
+            .items_center()
+            .justify_center()
             .child(
                 div()
                     .text_sm()
@@ -65,6 +64,7 @@ pub fn render_script_list(
                             .map(|(_, s)| s.clone());
                         this.child(if let Some(character) = character {
                             h_flex()
+                                .w_full()
                                 .gap_2()
                                 .items_center()
                                 .child(
@@ -73,7 +73,12 @@ pub fn render_script_list(
                                         .text_color(cx.theme().muted_foreground)
                                         .child("角色"),
                                 )
-                                .child(Input::new(&character))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Input::new(&character)),
+                                )
                                 .into_any_element()
                         } else {
                             div().into_any_element()
@@ -165,6 +170,10 @@ pub fn render_script_list(
                             cx.notify();
                             return;
                         }
+                        if !this.state.script_focus.should_rebuild_editor_on_press(index) {
+                            cx.stop_propagation();
+                            return;
+                        }
                         this.state.click_script_block(index);
                         this.invalidate_script_editor_inputs();
                         this.ensure_script_editing_input(window, cx);
@@ -238,12 +247,8 @@ pub fn render_script_list(
     v_flex()
         .id("script-list")
         .flex_1()
-        .gap_1()
-        .p_2()
-        .rounded_md()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted)
+        .w_full()
+        .items_center()
         .overflow_y_scroll()
         .on_mouse_down(
             MouseButton::Left,
@@ -253,6 +258,15 @@ pub fn render_script_list(
                 cx.notify();
             }),
         )
-        .children(children)
+        .child(
+            v_flex()
+                .id("script-list-measure")
+                .w_full()
+                .max_w(px(MANUSCRIPT_MEASURE_PX))
+                .gap_0p5()
+                .px_2()
+                .py_1()
+                .children(children),
+        )
         .into_any_element()
 }

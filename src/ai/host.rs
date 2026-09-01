@@ -62,6 +62,7 @@ pub struct AiSessionHost<L> {
     pub ctx: SharedCtx,
     lean: LeanContext,
     llm: L,
+    system_prompt: String,
 }
 
 impl<L: Think + Clone + Send> AiSessionHost<L> {
@@ -70,7 +71,13 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
             ctx: Arc::new(Mutex::new(ctx)),
             lean,
             llm,
+            system_prompt: FunctionCallAgent::<RaiLLM>::DEFAULT_SYSTEM_PROMPT.to_string(),
         }
+    }
+
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = prompt.into();
+        self
     }
 
     pub async fn run(
@@ -96,7 +103,7 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
         let tools = build_all_tools(self.ctx.clone());
         let mut agent = FunctionCallAgent::from_parts(
             "nwer",
-            FunctionCallAgent::<RaiLLM>::DEFAULT_SYSTEM_PROMPT,
+            self.system_prompt.as_str(),
             Config::default()
                 .with_max_token(max_tokens)
                 .with_max_tool_rounds(max_tool_rounds.max(1)),

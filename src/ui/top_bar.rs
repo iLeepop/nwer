@@ -47,7 +47,7 @@ pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl
         .id("top-bar")
         .w_full()
         .px_3()
-        .py_2()
+        .py_1p5()
         .gap_2()
         .items_center()
         .border_b_1()
@@ -55,6 +55,7 @@ pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl
         .bg(cx.theme().background)
         .child(
             Button::new("project-dropdown")
+                .ghost()
                 .small()
                 .label(project_label)
                 .dropdown_menu({
@@ -73,23 +74,6 @@ pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl
                         menu
                     }
                 }),
-        )
-        .child(
-            Button::new("new-project")
-                .primary()
-                .small()
-                .label("新建")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.prompt_new_project(window, cx);
-                })),
-        )
-        .child(
-            Button::new("open-project")
-                .small()
-                .label("打开")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.prompt_open_project(window, cx);
-                })),
         )
         .child(div().flex_1())
         .child(
