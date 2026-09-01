@@ -18,6 +18,8 @@ pub struct LeanContext {
     pub project: ProjectContext,
     pub focus: Option<LeanFocus>,
     pub selection: Vec<LeanSelection>,
+    /// 用户拖入 AI 面板的附加引用（瘦元数据）。
+    pub attached_refs: Vec<crate::ai::AiContextRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +55,7 @@ impl LeanContext {
                     text: b.content.clone(),
                 })
                 .collect(),
+            attached_refs: Vec::new(),
         }
     }
 }
@@ -146,6 +149,9 @@ pub fn format_lean_context(lean: &LeanContext) -> String {
             ));
         }
     }
+    if let Some(attached) = crate::ai::format_attached_refs(&lean.attached_refs) {
+        lines.push(attached);
+    }
     lines.join("\n")
 }
 
@@ -229,6 +235,7 @@ mod tests {
                 block_type: "叙述".into(),
                 text: "开篇选区".into(),
             }],
+            attached_refs: Vec::new(),
         }
     }
 

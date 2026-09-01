@@ -18,10 +18,11 @@ impl BlockChrome {
     }
 }
 
-/// 拖拽排序载荷。
+/// 拖拽排序载荷（亦可投放到 AI 输入坞成芯片）。
 #[derive(Clone)]
 pub struct DragBlock {
     pub index: usize,
+    pub context: crate::ai::AiContextRef,
 }
 
 impl Render for DragBlock {
@@ -37,8 +38,12 @@ impl Render for DragBlock {
     }
 }
 
-pub fn render_drag_handle(index: usize, cx: &mut Context<'_, Workspace>) -> impl IntoElement {
-    let drag = DragBlock { index };
+pub fn render_drag_handle(
+    index: usize,
+    context: crate::ai::AiContextRef,
+    cx: &mut Context<'_, Workspace>,
+) -> impl IntoElement {
+    let drag = DragBlock { index, context };
     div()
         .id(SharedString::from(format!("drag-{index}")))
         .absolute()

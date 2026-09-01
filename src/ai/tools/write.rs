@@ -524,7 +524,7 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                                     "type": "string",
                                     "enum": [
                                         "scene_heading", "action", "character", "dialogue",
-                                        "transition", "camera", "music", "mood", "note"
+                                        "transition", "camera", "music", "sfx", "mood", "note"
                                     ],
                                 },
                                 "content": { "type": "string" },
@@ -587,7 +587,7 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                         "type": "string",
                         "enum": [
                             "scene_heading", "action", "character", "dialogue",
-                            "transition", "camera", "music", "mood", "note"
+                            "transition", "camera", "music", "sfx", "mood", "note"
                         ],
                     },
                 },

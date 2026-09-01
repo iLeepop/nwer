@@ -39,6 +39,35 @@ pub fn render_script_list(
     let blocks = script.blocks.clone();
     let focus = workspace.state.script_focus.clone();
     let multi = workspace.state.script_multi_select.clone();
+    let picking = workspace.state.script_ends_at_picking;
+    let span_hints: Vec<Option<String>> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, block)| {
+            if !block.block_type.is_span_cue() {
+                return None;
+            }
+            if let Some(end_id) = block.ends_at {
+                let summary = script
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == end_id)
+                    .map(|b| {
+                        let t = b.content.trim();
+                        if t.is_empty() {
+                            format!("至：第 {} 块", script.blocks.iter().position(|x| x.id == end_id).map(|p| p + 1).unwrap_or(0))
+                        } else {
+                            let short: String = t.chars().take(12).collect();
+                            format!("至：{short}")
+                        }
+                    })
+                    .unwrap_or_else(|| "至：（目标已失效，将用默认）".into());
+                Some(summary)
+            } else {
+                script.default_span_end_hint(i).map(|s| s.to_string())
+            }
+        })
+        .collect();
 
     let mut children: Vec<AnyElement> = Vec::new();
 
@@ -47,6 +76,15 @@ pub fn render_script_list(
         let editing = matches!(focus, ScriptFocus::Editing { index: i } if i == index);
         let allows_character = block.block_type.allows_character();
         let is_note = block.block_type == ScriptBlockType::Note;
+        let is_picking_source = picking == Some(index);
+        let span_hint = span_hints.get(index).and_then(|h| h.clone());
+        let cue_label = match block.block_type {
+            ScriptBlockType::Music => Some("音乐"),
+            ScriptBlockType::Sfx => Some("音效"),
+            ScriptBlockType::Mood => Some("氛围"),
+            ScriptBlockType::Camera => Some("镜头"),
+            _ => None,
+        };
 
         let body = if editing {
             if let Some((_, input)) = workspace
@@ -113,6 +151,22 @@ pub fn render_script_list(
                             )),
                     )
                 })
+                .when(cue_label.is_some(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(cue_label.unwrap_or_default()),
+                    )
+                })
+                .when(span_hint.is_some(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(span_hint.clone().unwrap_or_default()),
+                    )
+                })
                 .child({
                     let mut el = div()
                         .text_sm()
@@ -143,6 +197,12 @@ pub fn render_script_list(
                 .into_any_element()
         };
 
+        let row_border = if is_picking_source {
+            cx.theme().accent
+        } else {
+            border
+        };
+
         children.push(
             div()
                 .group("script-row")
@@ -154,11 +214,32 @@ pub fn render_script_list(
                 .pr_8()
                 .rounded_md()
                 .border_1()
-                .border_color(border)
+                .border_color(row_border)
                 .bg(bg)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        if this.state.script_ends_at_picking.is_some() {
+                            match this
+                                .state
+                                .try_complete_script_ends_at_pick(index, Utc::now())
+                            {
+                                Ok(true) => {
+                                    this.invalidate_script_editor_inputs();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                    return;
+                                }
+                                Ok(false) => {}
+                                Err(err) => {
+                                    eprintln!("set ends_at failed: {err:#}");
+                                    this.state.cancel_script_ends_at_pick();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
                         if event.modifiers.shift {
                             if let Some(anchor) = this.state.script_focus.selected_index() {
                                 this.state.set_script_multi_select(anchor, index);
@@ -197,7 +278,26 @@ pub fn render_script_list(
                     }
                     cx.notify();
                 }))
-                .child(render_script_drag_handle(index, cx))
+                .child(render_script_drag_handle(
+                    index,
+                    crate::ai::AiContextRef {
+                        kind: crate::ai::AiContextKind::ScriptBlock,
+                        id: Some(block.id),
+                        path: None,
+                        title: {
+                            let preview = preview_text(block);
+                            let t = preview.chars().take(24).collect::<String>();
+                            if preview.chars().count() > 24 {
+                                format!("{t}…")
+                            } else if t.is_empty() {
+                                format!("块 {}", index + 1)
+                            } else {
+                                t
+                            }
+                        },
+                    },
+                    cx,
+                ))
                 .child(
                     div()
                         .absolute()

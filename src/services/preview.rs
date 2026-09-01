@@ -24,8 +24,8 @@ fn chapter_block_preview_line(block: &Block) -> Option<String> {
 pub fn script_preview_lines(script: &ScriptDoc) -> Vec<String> {
     let mut last_character: Option<String> = None;
     let mut lines = Vec::new();
-    for block in &script.blocks {
-        if let Some(line) = script_block_preview_line(block, &mut last_character) {
+    for (index, block) in script.blocks.iter().enumerate() {
+        if let Some(line) = script_block_preview_line(script, index, block, &mut last_character) {
             lines.push(line);
         }
     }
@@ -33,6 +33,8 @@ pub fn script_preview_lines(script: &ScriptDoc) -> Vec<String> {
 }
 
 fn script_block_preview_line(
+    script: &ScriptDoc,
+    index: usize,
     block: &ScriptBlock,
     last_character: &mut Option<String>,
 ) -> Option<String> {
@@ -93,13 +95,31 @@ fn script_block_preview_line(
             if block.content.is_empty() {
                 return None;
             }
+            let end = script.resolved_span_end_index(index).unwrap_or(index);
+            Some(format!(
+                "音乐：{} （覆盖：块#{}–#{}）",
+                block.content,
+                index + 1,
+                end + 1
+            ))
+        }
+        ScriptBlockType::Sfx => {
+            if block.content.is_empty() {
+                return None;
+            }
             Some(format!("音效：{}", block.content))
         }
         ScriptBlockType::Mood => {
             if block.content.is_empty() {
                 return None;
             }
-            Some(format!("氛围：{}", block.content))
+            let end = script.resolved_span_end_index(index).unwrap_or(index);
+            Some(format!(
+                "氛围：{} （覆盖：块#{}–#{}）",
+                block.content,
+                index + 1,
+                end + 1
+            ))
         }
         ScriptBlockType::Note => {
             if block.content.is_empty() {

@@ -1,5 +1,6 @@
 mod actions;
 mod bridge;
+mod context_ref;
 mod effect;
 mod host;
 mod intent;
@@ -15,6 +16,9 @@ pub use actions::action_prompt;
 pub use bridge::{
     build_llm, chapter_context_from_app, hydrate_shared_ctx, lean_context_from_app,
     provider_from_settings, resolve_max_tokens, validate_ai_ready, MAX_TOKENS_HIGH,
+};
+pub use context_ref::{
+    format_attached_refs, push_unique, AiContextKind, AiContextRef,
 };
 pub use effect::{
     apply_all, apply_proposal, discard_all, discard_proposal, summarize_intent, EffectPolicy,

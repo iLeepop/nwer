@@ -142,6 +142,14 @@ fn render_grouped(
                 let id = entry.id;
                 let key = entry.key.clone();
                 let selected = selected_id == Some(id);
+                let drag_payload = crate::ui::AiDragPayload {
+                    context: crate::ai::AiContextRef {
+                        kind: crate::ai::AiContextKind::OutlineEntry,
+                        id: Some(id),
+                        path: None,
+                        title: key.clone(),
+                    },
+                };
                 rows.push(
                     div()
                         .id(SharedString::from(format!("outline-wrap-{id}")))
@@ -154,6 +162,7 @@ fn render_grouped(
                                 cx.notify();
                             }),
                         )
+                        .on_drag(drag_payload, |drag, _, _, cx| cx.new(|_| drag.clone()))
                         .context_menu(move |menu, _, _| build_context_menu(menu))
                         .child(
                             ListItem::new(format!("outline-{id}"))

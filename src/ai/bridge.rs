@@ -112,6 +112,7 @@ pub fn lean_context_from_app(state: &AppState) -> LeanContext {
                 title: script.title.clone(),
             }),
             selection,
+            attached_refs: state.ai.context_refs.clone(),
         };
     }
 
@@ -143,6 +144,7 @@ pub fn lean_context_from_app(state: &AppState) -> LeanContext {
                 title: chapter.title.clone(),
             }),
             selection,
+            attached_refs: state.ai.context_refs.clone(),
         };
     }
 
@@ -150,6 +152,7 @@ pub fn lean_context_from_app(state: &AppState) -> LeanContext {
         project,
         focus: None,
         selection: Vec::new(),
+        attached_refs: state.ai.context_refs.clone(),
     }
 }
 

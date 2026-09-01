@@ -1,3 +1,4 @@
+use crate::ai::context_ref::AiContextRef;
 use crate::ai::{InMemoryMutator, ProposalStore};
 
 /// 对话气泡角色。
@@ -70,6 +71,8 @@ pub struct AiUiState {
     pub max_token_tier: AiMaxTokenTier,
     /// 当前 Agent 角色。
     pub agent: AiAgentKind,
+    /// 拖入输入坞的上下文芯片（发送后清空）。
+    pub context_refs: Vec<AiContextRef>,
     pub messages: Vec<AiChatMessage>,
     pub proposals: ProposalStore,
     /// 提案列表是否展开（顶栏始终可见；默认展开）。
@@ -88,6 +91,7 @@ impl Default for AiUiState {
             auto_apply: false,
             max_token_tier: AiMaxTokenTier::Auto,
             agent: AiAgentKind::Default,
+            context_refs: Vec::new(),
             messages: Vec::new(),
             proposals: ProposalStore::default(),
             proposals_expanded: true,

@@ -213,7 +213,26 @@ pub fn render_block_list(
                     }
                     cx.notify();
                 }))
-                .child(render_drag_handle(index, cx))
+                .child(render_drag_handle(
+                    index,
+                    crate::ai::AiContextRef {
+                        kind: crate::ai::AiContextKind::Block,
+                        id: Some(block.id),
+                        path: None,
+                        title: {
+                            let preview = preview_text(block);
+                            let t = preview.chars().take(24).collect::<String>();
+                            if preview.chars().count() > 24 {
+                                format!("{t}…")
+                            } else if t.is_empty() {
+                                format!("块 {}", index + 1)
+                            } else {
+                                t
+                            }
+                        },
+                    },
+                    cx,
+                ))
                 .child(
                     div()
                         .absolute()

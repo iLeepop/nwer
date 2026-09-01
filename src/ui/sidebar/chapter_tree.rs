@@ -155,6 +155,19 @@ fn render_node(
     };
 
     let mut rows = Vec::new();
+    let drag_context = crate::ai::AiContextRef {
+        kind: if is_dir {
+            crate::ai::AiContextKind::ChapterDir
+        } else {
+            crate::ai::AiContextKind::Chapter
+        },
+        id: node.chapter_id,
+        path: Some(rel.clone()),
+        title: label.clone(),
+    };
+    let drag_payload = crate::ui::AiDragPayload {
+        context: drag_context,
+    };
     rows.push(
         div()
             .id(SharedString::from(format!("wrap-{rel}")))
@@ -172,6 +185,7 @@ fn render_node(
                     }
                 }),
             )
+            .on_drag(drag_payload, |drag, _, _, cx| cx.new(|_| drag.clone()))
             .context_menu(move |menu, _window, _cx| build_context_menu(menu, is_dir))
             .child(
                 ListItem::new(format!("node-{rel}"))

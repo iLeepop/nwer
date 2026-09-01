@@ -60,6 +60,7 @@ pub fn render_ai_panel(
     };
     let tier_label = max_token_tier.label();
     let agent_label = agent.label();
+    let context_refs = workspace.state.ai.context_refs.clone();
 
     v_flex()
         .id("ai-panel")
@@ -126,6 +127,7 @@ pub fn render_ai_panel(
                     proposal_count,
                     proposals_expanded,
                     proposals,
+                    context_refs,
                     policy_label,
                     tier_label,
                     agent_label,
@@ -176,6 +178,7 @@ fn render_input_dock(
     proposal_count: usize,
     proposals_expanded: bool,
     proposals: Vec<(uuid::Uuid, String, bool)>,
+    context_refs: Vec<crate::ai::AiContextRef>,
     policy_label: &'static str,
     tier_label: &'static str,
     agent_label: &'static str,
@@ -195,6 +198,38 @@ fn render_input_dock(
         .bg(cx.theme().background)
         .px_3()
         .py_2()
+        .drag_over::<crate::ui::AiDragPayload>(|style, _, _, cx| {
+            style.bg(cx.theme().drop_target)
+        })
+        .drag_over::<crate::ui::editor::DragBlock>(|style, _, _, cx| {
+            style.bg(cx.theme().drop_target)
+        })
+        .drag_over::<crate::ui::editor::DragScriptBlock>(|style, _, _, cx| {
+            style.bg(cx.theme().drop_target)
+        })
+        .on_drop(cx.listener(move |this, drag: &crate::ui::AiDragPayload, _, cx| {
+            if this.state.ai.busy {
+                return;
+            }
+            this.state.ai_add_context_ref(drag.context.clone());
+            cx.notify();
+        }))
+        .on_drop(cx.listener(move |this, drag: &crate::ui::editor::DragBlock, _, cx| {
+            if this.state.ai.busy {
+                return;
+            }
+            this.state.ai_add_context_ref(drag.context.clone());
+            cx.notify();
+        }))
+        .on_drop(cx.listener(
+            move |this, drag: &crate::ui::editor::DragScriptBlock, _, cx| {
+                if this.state.ai.busy {
+                    return;
+                }
+                this.state.ai_add_context_ref(drag.context.clone());
+                cx.notify();
+            },
+        ))
         .when(has_proposals, |dock| {
             dock.child(render_proposals_float(
                 proposal_count,
@@ -214,6 +249,9 @@ fn render_input_dock(
                 .border_1()
                 .border_color(cx.theme().border)
                 .bg(cx.theme().background)
+                .when(!context_refs.is_empty(), |wrap| {
+                    wrap.child(render_context_chips(&context_refs, busy, cx))
+                })
                 .child(
                     ai_input
                         .map(|input| {
@@ -243,6 +281,47 @@ fn render_input_dock(
                     cx,
                 )),
         )
+}
+
+fn render_context_chips(
+    refs: &[crate::ai::AiContextRef],
+    busy: bool,
+    cx: &mut Context<'_, Workspace>,
+) -> impl IntoElement {
+    h_flex()
+        .id("ai-context-chips")
+        .w_full()
+        .gap_1()
+        .flex_wrap()
+        .children(refs.iter().enumerate().map(|(i, r)| {
+            let label = format!("{} · {}", r.kind.label(), r.title);
+            h_flex()
+                .id(SharedString::from(format!("ai-chip-{i}")))
+                .gap_1()
+                .items_center()
+                .px_1p5()
+                .py_0p5()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().muted)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().foreground)
+                        .child(label),
+                )
+                .child(
+                    Button::new(format!("ai-chip-remove-{i}"))
+                        .ghost()
+                        .xsmall()
+                        .label("×")
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.ai_remove_context_ref_at(i);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        }))
 }
 
 fn render_toolbar(

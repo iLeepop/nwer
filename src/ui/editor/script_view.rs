@@ -10,10 +10,11 @@ use gpui_component::{
 use crate::models::{ScriptBlock, ScriptBlockType, ScriptFocus};
 use crate::ui::Workspace;
 
-/// 拖拽排序载荷。
+/// 拖拽排序载荷（亦可投放到 AI 输入坞成芯片）。
 #[derive(Clone)]
 pub struct DragScriptBlock {
     pub index: usize,
+    pub context: crate::ai::AiContextRef,
 }
 
 impl Render for DragScriptBlock {
@@ -29,8 +30,12 @@ impl Render for DragScriptBlock {
     }
 }
 
-pub fn render_script_drag_handle(index: usize, cx: &mut Context<'_, Workspace>) -> impl IntoElement {
-    let drag = DragScriptBlock { index };
+pub fn render_script_drag_handle(
+    index: usize,
+    context: crate::ai::AiContextRef,
+    cx: &mut Context<'_, Workspace>,
+) -> impl IntoElement {
+    let drag = DragScriptBlock { index, context };
     div()
         .id(SharedString::from(format!("script-drag-{index}")))
         .absolute()
@@ -76,6 +81,28 @@ pub fn render_script_menu(
                         });
                     },
                 ));
+            }
+            if current_type.is_span_cue() {
+                let ws_pick = workspace.clone();
+                menu = menu.item(PopupMenuItem::new("设置结束位置").on_click(move |_, _, cx| {
+                    ws_pick.update(cx, |this, cx| {
+                        if let Err(err) = this.state.begin_script_ends_at_pick(index) {
+                            eprintln!("begin ends_at pick failed: {err:#}");
+                        }
+                        cx.notify();
+                    });
+                }));
+                let ws_clear = workspace.clone();
+                menu = menu.item(PopupMenuItem::new("清除结束").on_click(move |_, _, cx| {
+                    ws_clear.update(cx, |this, cx| {
+                        if let Err(err) =
+                            this.state.set_script_ends_at_at(index, None, Utc::now())
+                        {
+                            eprintln!("clear ends_at failed: {err:#}");
+                        }
+                        cx.notify();
+                    });
+                }));
             }
             if index == 0 {
                 let ws = workspace.clone();

@@ -135,6 +135,8 @@ pub struct AppState {
     pub script_focus: ScriptFocus,
     /// 多选相邻剧本块（合并用）。
     pub script_multi_select: Option<ScriptMultiSelect>,
+    /// 正在为该下标的 music/mood 块点选结束位置。
+    pub script_ends_at_picking: Option<usize>,
     /// AI 面板：自动应用、对话、提案队列。
     pub ai: AiUiState,
 }
@@ -175,6 +177,7 @@ impl AppState {
             current_script_path: None,
             script_focus: ScriptFocus::Idle,
             script_multi_select: None,
+            script_ends_at_picking: None,
             ai: AiUiState::default(),
         })
     }
@@ -243,6 +246,20 @@ impl AppState {
 
     pub fn set_ai_agent(&mut self, agent: crate::ai::AiAgentKind) {
         self.ai.agent = agent;
+    }
+
+    pub fn ai_add_context_ref(&mut self, item: crate::ai::AiContextRef) -> bool {
+        crate::ai::push_unique(&mut self.ai.context_refs, item)
+    }
+
+    pub fn ai_remove_context_ref_at(&mut self, index: usize) {
+        if index < self.ai.context_refs.len() {
+            self.ai.context_refs.remove(index);
+        }
+    }
+
+    pub fn ai_clear_context_refs(&mut self) {
+        self.ai.context_refs.clear();
     }
 
     pub fn ai_push_user_message(&mut self, text: impl Into<String>) {
@@ -428,6 +445,7 @@ impl AppState {
     ) -> Result<()> {
         self.ai.busy = false;
         self.ai.streaming = false;
+        self.ai_clear_context_refs();
         match self.ai.messages.last_mut() {
             Some(m) if m.role == AiChatRole::Assistant => {
                 if m.text.is_empty() {
@@ -1533,6 +1551,7 @@ impl AppState {
         self.dirty = true;
         self.script_focus = self.script_focus.clone().clamp_to_len(script.blocks.len());
         self.script_multi_select = None;
+        self.script_ends_at_picking = None;
         self.flush_save(SaveTrigger::StructuralChange, now)
     }
 
@@ -1624,7 +1643,63 @@ impl AppState {
             };
         }
         self.script_multi_select = None;
+        self.script_ends_at_picking = None;
         self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    pub fn begin_script_ends_at_pick(&mut self, index: usize) -> Result<()> {
+        let script = self.current_script.as_ref().context("no script open")?;
+        let block = script
+            .blocks
+            .get(index)
+            .context("block index out of range")?;
+        anyhow::ensure!(
+            block.block_type.allows_ends_at(),
+            "ends_at only valid on music or mood blocks"
+        );
+        self.script_ends_at_picking = Some(index);
+        Ok(())
+    }
+
+    pub fn cancel_script_ends_at_pick(&mut self) {
+        self.script_ends_at_picking = None;
+    }
+
+    pub fn set_script_ends_at_at(
+        &mut self,
+        index: usize,
+        ends_at: Option<Uuid>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let script = self.current_script.as_mut().context("no script open")?;
+        script.set_ends_at(index, ends_at, now)?;
+        self.script_ends_at_picking = None;
+        self.dirty = true;
+        self.flush_save(SaveTrigger::StructuralChange, now)
+    }
+
+    /// 点选模式下完成结束块设置；返回是否消费了这次点击。
+    pub fn try_complete_script_ends_at_pick(
+        &mut self,
+        end_index: usize,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(start) = self.script_ends_at_picking else {
+            return Ok(false);
+        };
+        if end_index == start {
+            return Ok(true);
+        }
+        let end_id = {
+            let script = self.current_script.as_ref().context("no script open")?;
+            script
+                .blocks
+                .get(end_index)
+                .context("block index out of range")?
+                .id
+        };
+        self.set_script_ends_at_at(start, Some(end_id), now)?;
+        Ok(true)
     }
 
     pub fn click_script_block(&mut self, index: usize) {
@@ -1635,9 +1710,14 @@ impl AppState {
     pub fn click_script_editor_outside(&mut self) {
         self.script_focus = self.script_focus.clone().click_outside();
         self.script_multi_select = None;
+        self.script_ends_at_picking = None;
     }
 
     pub fn escape_script_focus(&mut self) {
+        if self.script_ends_at_picking.is_some() {
+            self.script_ends_at_picking = None;
+            return;
+        }
         self.script_focus = self.script_focus.clone().escape();
     }
 
@@ -2087,6 +2167,29 @@ mod tests {
         assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Writer);
         state.set_ai_agent(crate::ai::AiAgentKind::Director);
         assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Director);
+    }
+
+    #[test]
+    fn ai_context_refs_dedupe_and_clear_on_ingest() {
+        let (_dir, mut state) = state_with_temp_root();
+        let item = crate::ai::AiContextRef {
+            kind: crate::ai::AiContextKind::Chapter,
+            id: Some(uuid::Uuid::nil()),
+            path: Some("a.json".into()),
+            title: "A".into(),
+        };
+        assert!(state.ai_add_context_ref(item.clone()));
+        assert!(!state.ai_add_context_ref(item));
+        assert_eq!(state.ai.context_refs.len(), 1);
+        state
+            .ai_ingest_host_result(
+                "ok".into(),
+                crate::ai::ProposalStore::default(),
+                Vec::new(),
+                now(),
+            )
+            .unwrap();
+        assert!(state.ai.context_refs.is_empty());
     }
 
     #[test]
