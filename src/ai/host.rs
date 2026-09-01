@@ -80,6 +80,19 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
         max_tokens: u32,
         max_tool_rounds: u32,
     ) -> anyhow::Result<String> {
+        self.run_stream(action, user_prompt, max_tokens, max_tool_rounds, |_| {})
+            .await
+    }
+
+    /// 流式运行：内容增量通过 `on_delta` 回调；最终仍返回完整回复字符串。
+    pub async fn run_stream(
+        &mut self,
+        action: AiAction,
+        user_prompt: &str,
+        max_tokens: u32,
+        max_tool_rounds: u32,
+        mut on_delta: impl FnMut(&str) + Send,
+    ) -> anyhow::Result<String> {
         let tools = build_all_tools(self.ctx.clone());
         let mut agent = FunctionCallAgent::from_parts(
             "nwer",
@@ -92,7 +105,7 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
         );
         let message = compose_user_message(&self.lean, action, user_prompt);
         agent
-            .run(message)
+            .run_stream(message, |delta| on_delta(delta))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }

@@ -185,65 +185,110 @@ impl Workspace {
 
         self.state.ai_push_user_message(&text);
         self.state.ai_mark_busy(true);
+        self.state.ai_begin_assistant_stream();
         input.update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
 
         self._ai_task = Some(cx.spawn(async move |this, cx| {
-            // GPUI background executor ≠ tokio；raiL/reqwest 需要独立 Runtime。
-            let run_result = cx
-                .background_executor()
-                .spawn(async move {
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_multi_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
-                        rt.block_on(async move {
-                            let llm = crate::ai::build_llm(&settings)?;
-                            let mut host =
-                                crate::ai::AiSessionHost::from_llm(llm, shared, lean);
-                            let reply = host
-                                .run(
-                                    crate::ai::AiAction::Chat,
-                                    &text,
-                                    max_tokens,
-                                    max_tool_rounds,
-                                )
-                                .await?;
-                            let (proposals, ui_commands) = {
-                                let mut guard = host
-                                    .ctx
-                                    .lock()
-                                    .map_err(|_| anyhow::anyhow!("ai ctx poisoned"))?;
-                                let proposals = std::mem::take(&mut guard.proposals);
-                                let ui_commands = guard.take_ui_commands();
-                                (proposals, ui_commands)
-                            };
-                            anyhow::Ok((reply, proposals, ui_commands))
-                        })
-                    })
-                    .join()
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("AI worker thread panicked")))
-                })
-                .await;
+            enum StreamEvent {
+                Delta(String),
+                Done(
+                    anyhow::Result<(
+                        String,
+                        crate::ai::ProposalStore,
+                        Vec<crate::ai::AiUiCommand>,
+                    )>,
+                ),
+            }
 
-            this.update(cx, |this, cx| {
-                match run_result {
-                    Ok((reply, proposals, ui_commands)) => {
-                        if let Err(err) = this.state.ai_ingest_host_result(
-                            reply,
-                            proposals,
-                            ui_commands,
-                            Utc::now(),
-                        ) {
-                            this.state.ai_fail_run(err);
+            let (tx, rx) = std::sync::mpsc::channel::<StreamEvent>();
+            let tx_done = tx.clone();
+            let worker = std::thread::spawn(move || {
+                let result = (|| {
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
+                    rt.block_on(async move {
+                        let llm = crate::ai::build_llm(&settings)?;
+                        let mut host = crate::ai::AiSessionHost::from_llm(llm, shared, lean);
+                        let tx_delta = tx;
+                        let reply = host
+                            .run_stream(
+                                crate::ai::AiAction::Chat,
+                                &text,
+                                max_tokens,
+                                max_tool_rounds,
+                                move |delta| {
+                                    let _ = tx_delta.send(StreamEvent::Delta(delta.to_string()));
+                                },
+                            )
+                            .await?;
+                        let (proposals, ui_commands) = {
+                            let mut guard = host
+                                .ctx
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("ai ctx poisoned"))?;
+                            let proposals = std::mem::take(&mut guard.proposals);
+                            let ui_commands = guard.take_ui_commands();
+                            (proposals, ui_commands)
+                        };
+                        anyhow::Ok((reply, proposals, ui_commands))
+                    })
+                })();
+                let _ = tx_done.send(StreamEvent::Done(result));
+            });
+
+            loop {
+                let mut finished = None;
+                loop {
+                    match rx.try_recv() {
+                        Ok(StreamEvent::Delta(delta)) => {
+                            this.update(cx, |this, cx| {
+                                this.state.ai_append_stream_delta(&delta);
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                        Ok(StreamEvent::Done(result)) => {
+                            finished = Some(result);
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            finished =
+                                Some(Err(anyhow::anyhow!("AI stream channel disconnected")));
+                            break;
                         }
                     }
-                    Err(err) => this.state.ai_fail_run(err),
                 }
-                cx.notify();
-            })
-            .ok();
+
+                if let Some(run_result) = finished {
+                    let _ = worker.join();
+                    this.update(cx, |this, cx| {
+                        match run_result {
+                            Ok((reply, proposals, ui_commands)) => {
+                                if let Err(err) = this.state.ai_ingest_host_result(
+                                    reply,
+                                    proposals,
+                                    ui_commands,
+                                    Utc::now(),
+                                ) {
+                                    this.state.ai_fail_run(err);
+                                }
+                            }
+                            Err(err) => this.state.ai_fail_run(err),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
         }));
     }
 

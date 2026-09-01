@@ -46,6 +46,8 @@ pub struct AiUiState {
     pub messages: Vec<AiChatMessage>,
     pub proposals: ProposalStore,
     pub busy: bool,
+    /// 正在流式接收助手回复（最后一条 Assistant 为当前气泡）。
+    pub streaming: bool,
     pub status_message: Option<String>,
     /// 无项目目录时提案应用的内存镜像。
     pub mutator: InMemoryMutator,
@@ -59,6 +61,7 @@ impl Default for AiUiState {
             messages: Vec::new(),
             proposals: ProposalStore::default(),
             busy: false,
+            streaming: false,
             status_message: None,
             mutator: InMemoryMutator::new(),
         }

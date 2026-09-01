@@ -243,6 +243,28 @@ impl AppState {
         });
     }
 
+    /// 开始流式助手气泡（空内容，后续 append delta）。
+    pub fn ai_begin_assistant_stream(&mut self) {
+        self.ai.streaming = true;
+        self.ai.messages.push(AiChatMessage {
+            role: AiChatRole::Assistant,
+            text: String::new(),
+        });
+        self.ai.status_message = Some("生成中…".into());
+    }
+
+    /// 向当前流式助手气泡追加增量。
+    pub fn ai_append_stream_delta(&mut self, delta: &str) {
+        if !self.ai.streaming || delta.is_empty() {
+            return;
+        }
+        if let Some(m) = self.ai.messages.last_mut() {
+            if m.role == AiChatRole::Assistant {
+                m.text.push_str(delta);
+            }
+        }
+    }
+
     pub fn ai_enqueue_proposal(&mut self, intent: AiIntent) {
         self.ai.proposals.push(Proposal {
             intent,
@@ -345,6 +367,7 @@ impl AppState {
     }
 
     /// Host 跑完后合并提案与 UI 指令；若自动应用则经 WorkspaceMutator 落盘。
+    /// 若已在流式气泡中累积文本，则不再新建助手消息（空气泡则用 `reply` 填充）。
     pub fn ai_ingest_host_result(
         &mut self,
         reply: String,
@@ -353,7 +376,15 @@ impl AppState {
         now: DateTime<Utc>,
     ) -> Result<()> {
         self.ai.busy = false;
-        self.ai_push_assistant(reply);
+        self.ai.streaming = false;
+        match self.ai.messages.last_mut() {
+            Some(m) if m.role == AiChatRole::Assistant => {
+                if m.text.is_empty() {
+                    m.text = reply;
+                }
+            }
+            _ => self.ai_push_assistant(reply),
+        }
         for id in proposals.intent_ids() {
             if let Some(p) = proposals.remove(id) {
                 self.ai.proposals.push(p);
@@ -414,8 +445,14 @@ impl AppState {
 
     pub fn ai_fail_run(&mut self, err: impl std::fmt::Display) {
         self.ai.busy = false;
+        self.ai.streaming = false;
         let msg = format!("{err:#}");
-        self.ai_push_assistant(format!("错误：{msg}"));
+        match self.ai.messages.last_mut() {
+            Some(m) if m.role == AiChatRole::Assistant && m.text.is_empty() => {
+                m.text = format!("错误：{msg}");
+            }
+            _ => self.ai_push_assistant(format!("错误：{msg}")),
+        }
         self.ai.status_message = Some(msg);
     }
 
@@ -1960,6 +1997,28 @@ mod tests {
             state.ai.messages,
             state.ai.status_message
         );
+    }
+
+    #[test]
+    fn ai_stream_delta_appends_to_assistant_bubble() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.ai_begin_assistant_stream();
+        state.ai_append_stream_delta("你好");
+        state.ai_append_stream_delta("，世界");
+        assert_eq!(state.ai.messages.last().unwrap().text, "你好，世界");
+        assert!(state.ai.streaming);
+
+        state
+            .ai_ingest_host_result(
+                "ignored-when-nonempty".into(),
+                crate::ai::ProposalStore::default(),
+                Vec::new(),
+                now(),
+            )
+            .unwrap();
+        assert!(!state.ai.streaming);
+        assert_eq!(state.ai.messages.last().unwrap().text, "你好，世界");
+        assert_eq!(state.ai.messages.iter().filter(|m| m.role == AiChatRole::Assistant).count(), 1);
     }
 
     #[test]
