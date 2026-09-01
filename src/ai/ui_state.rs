@@ -45,6 +45,8 @@ pub struct AiUiState {
     pub max_token_tier: AiMaxTokenTier,
     pub messages: Vec<AiChatMessage>,
     pub proposals: ProposalStore,
+    /// 提案列表是否展开（顶栏始终可见；默认展开）。
+    pub proposals_expanded: bool,
     pub busy: bool,
     /// 正在流式接收助手回复（最后一条 Assistant 为当前气泡）。
     pub streaming: bool,
@@ -60,6 +62,7 @@ impl Default for AiUiState {
             max_token_tier: AiMaxTokenTier::Auto,
             messages: Vec::new(),
             proposals: ProposalStore::default(),
+            proposals_expanded: true,
             busy: false,
             streaming: false,
             status_message: None,

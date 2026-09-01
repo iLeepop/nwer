@@ -122,7 +122,24 @@ pub(crate) fn error_receipt(summary: impl Into<String>, error: impl Into<String>
         intent_id: new_intent_id(),
         summary: summary.into(),
         error: Some(error.into()),
+        chapter_id: None,
+        script_id: None,
     })?)
+}
+
+fn script_available(ctx: &SharedAiCtx, script_id: Uuid) -> bool {
+    if ctx.mutator.get_script(script_id).is_some() {
+        return true;
+    }
+    ctx.proposals.iter().any(|p| {
+        matches!(
+            &p.intent,
+            AiIntent::CreateScript {
+                script_id: Some(id),
+                ..
+            } if *id == script_id
+        )
+    })
 }
 
 fn validate_chapter_speaker(block_type: BlockType, speaker: &Option<String>) -> Option<String> {
@@ -448,7 +465,7 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
         let ctx = ctx.clone();
         reg.register(
             "create_script",
-            "创建新剧本；可选 parent_rel / name（相对 scripts/）",
+            "创建新剧本；可选 parent_rel / name（相对 scripts/）。返回提案含 script_id，后续 append_script_blocks 须使用该 script_id（不是 intent_id）",
             ToolParameters::new(serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -475,11 +492,12 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                             return error_receipt("创建剧本", "name 不能为空");
                         }
                     }
+                    let script_id = new_intent_id();
                     let intent = AiIntent::CreateScript {
                         intent_id: new_intent_id(),
                         title: args.title,
                         parent_rel: args.parent_rel,
-                        script_id: None,
+                        script_id: Some(script_id),
                         name: args.name,
                     };
                     apply_via_policy(&ctx, intent)
@@ -523,6 +541,17 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
                 async move {
                     if args.blocks.is_empty() {
                         return error_receipt("追加剧本块", "blocks 不能为空");
+                    }
+                    if let Ok(guard) = ctx.lock() {
+                        if !script_available(&guard, args.script_id) {
+                            return error_receipt(
+                                "追加剧本块",
+                                format!(
+                                    "script {} 不存在；请先 create_script 并使用返回的 script_id，勿用 intent_id",
+                                    args.script_id
+                                ),
+                            );
+                        }
                     }
                     let mut blocks = Vec::with_capacity(args.blocks.len());
                     for input in args.blocks {
@@ -599,6 +628,7 @@ pub fn build_write_tools(ctx: SharedCtx, reg: &mut ToolRegister) {
 mod tests {
     use super::*;
     use crate::ai::tools::{SharedAiCtx, build_all_tools};
+    use rai_l::agent::core::ToolRegister;
     use std::sync::{Arc, Mutex};
 
     fn sample_chapter_id() -> Uuid {
@@ -696,5 +726,79 @@ mod tests {
             .unwrap();
         assert_eq!(out["status"], "error");
         assert_eq!(ctx.lock().unwrap().proposals.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_script_proposal_returns_script_id_distinct_from_intent_id() {
+        let ctx = Arc::new(Mutex::new(SharedAiCtx::new(false)));
+        let mut reg = ToolRegister::new();
+        build_write_tools(ctx.clone(), &mut reg);
+        let out = reg
+            .call(
+                "create_script",
+                serde_json::json!({
+                    "title": "晋升答辩",
+                    "parent_rel": "第二卷-职场修仙",
+                    "name": "sc-001",
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out["status"], "proposed");
+        let intent_id = out["intent_id"].as_str().unwrap();
+        let script_id = out["script_id"].as_str().unwrap();
+        assert_ne!(intent_id, script_id);
+        assert!(out["summary"].as_str().unwrap().contains(script_id));
+    }
+
+    #[tokio::test]
+    async fn append_script_blocks_rejects_unknown_script_id() {
+        let ctx = Arc::new(Mutex::new(SharedAiCtx::new(false)));
+        let mut reg = ToolRegister::new();
+        build_write_tools(ctx.clone(), &mut reg);
+        let bogus = Uuid::from_u128(404);
+        let out = reg
+            .call(
+                "append_script_blocks",
+                serde_json::json!({
+                    "script_id": bogus,
+                    "blocks": [{ "type": "action", "content": "开场" }],
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out["status"], "error");
+        assert!(out["error"].as_str().unwrap().contains("intent_id"));
+    }
+
+    #[tokio::test]
+    async fn create_script_then_append_blocks_both_propose() {
+        let ctx = Arc::new(Mutex::new(SharedAiCtx::new(false)));
+        let mut reg = ToolRegister::new();
+        build_write_tools(ctx.clone(), &mut reg);
+        let created = reg
+            .call(
+                "create_script",
+                serde_json::json!({ "title": "第一集", "parent_rel": "", "name": "sc-001" }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let script_id: Uuid = created["script_id"].as_str().unwrap().parse().unwrap();
+        let appended = reg
+            .call(
+                "append_script_blocks",
+                serde_json::json!({
+                    "script_id": script_id,
+                    "blocks": [{ "type": "action", "content": "开门" }],
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(appended["status"], "proposed");
+        assert_eq!(ctx.lock().unwrap().proposals.len(), 2);
     }
 }

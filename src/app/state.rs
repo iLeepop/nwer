@@ -27,8 +27,9 @@ use crate::storage::{
     load_config_from, load_project, load_script, move_node, move_sibling, outline_entry_path,
     rename_node, rename_outline_entry, resolve_rel, save_chapter, save_config_to,
     save_outline_entry, save_project, save_script, scan_chapter_tree, scan_script_tree,
-    scripts_dir, create_script_directory, delete_script_node, move_script_node,
-    move_script_sibling, rename_script_node, resolve_script_rel, script_dir_nonempty,
+    find_node_by_rel, find_script_node_by_rel, scripts_dir, create_script_directory,
+    delete_script_node, move_script_node, move_script_sibling, rename_script_node,
+    resolve_script_rel, script_dir_nonempty,
 };
 use uuid::Uuid;
 
@@ -68,6 +69,8 @@ pub struct WorkspaceUi {
     pub sidebar_visible: bool,
     /// 相对 `chapters/` 的已展开目录节点。
     pub expanded_nodes: HashSet<String>,
+    /// 已折叠的大纲分类（默认全部展开）。
+    pub collapsed_outline_categories: HashSet<String>,
     /// 当前选中的树节点相对路径（目录或章节）。
     pub selected_node: Option<String>,
 }
@@ -80,6 +83,7 @@ impl Default for WorkspaceUi {
             preview_panel_open: false,
             sidebar_visible: true,
             expanded_nodes: HashSet::new(),
+            collapsed_outline_categories: HashSet::new(),
             selected_node: None,
         }
     }
@@ -225,6 +229,14 @@ impl AppState {
         self.ai.auto_apply = !self.ai.auto_apply;
     }
 
+    pub fn set_ai_auto_apply(&mut self, auto_apply: bool) {
+        self.ai.auto_apply = auto_apply;
+    }
+
+    pub fn toggle_ai_proposals_expanded(&mut self) {
+        self.ai.proposals_expanded = !self.ai.proposals_expanded;
+    }
+
     pub fn set_ai_max_token_tier(&mut self, tier: crate::ai::AiMaxTokenTier) {
         self.ai.max_token_tier = tier;
     }
@@ -278,8 +290,9 @@ impl AppState {
             self.flush_save(SaveTrigger::BeforeLeave, now)?;
             let project_dir = self.project_dir.clone().expect("project_dir");
             let mut mutator = WorkspaceMutator::open(project_dir).with_now(now);
-            apply_proposal(intent_id, &mut self.ai.proposals, &mut mutator)?;
-            self.refresh_after_ai_mutate()
+            let apply_result = apply_proposal(intent_id, &mut self.ai.proposals, &mut mutator);
+            self.refresh_after_ai_mutate()?;
+            apply_result
         } else {
             apply_proposal(intent_id, &mut self.ai.proposals, &mut self.ai.mutator)
         }
@@ -294,8 +307,9 @@ impl AppState {
             self.flush_save(SaveTrigger::BeforeLeave, now)?;
             let project_dir = self.project_dir.clone().expect("project_dir");
             let mut mutator = WorkspaceMutator::open(project_dir).with_now(now);
-            apply_all(&mut self.ai.proposals, &mut mutator)?;
-            self.refresh_after_ai_mutate()
+            let apply_result = apply_all(&mut self.ai.proposals, &mut mutator);
+            self.refresh_after_ai_mutate()?;
+            apply_result
         } else {
             apply_all(&mut self.ai.proposals, &mut self.ai.mutator)
         }
@@ -305,6 +319,7 @@ impl AppState {
         self.refresh_chapter_tree()?;
         self.refresh_script_tree()?;
         self.refresh_outline_entries()?;
+        self.sync_open_documents_with_trees();
 
         if let (Some(rel), Some(id)) = (
             self.current_chapter_path.clone(),
@@ -345,6 +360,38 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    /// 树已重扫后，关闭已从磁盘消失的章节/剧本/选中项。
+    fn sync_open_documents_with_trees(&mut self) {
+        if let Some(rel) = self.current_chapter_path.clone() {
+            if find_node_by_rel(&self.chapter_tree, &rel).is_none() {
+                self.clear_paths_under(&rel);
+            }
+        }
+        if let Some(rel) = self.current_script_path.clone() {
+            if find_script_node_by_rel(&self.script_tree, &rel).is_none() {
+                self.clear_paths_under(&rel);
+            }
+        }
+        if let Some(id) = self.current_outline.as_ref().map(|e| e.id) {
+            if !self.outline_entries.iter().any(|e| e.id == id) {
+                self.current_outline = None;
+                self.dirty = false;
+                self.debounce.cancel();
+            }
+        }
+        if let Some(sel) = self.ui.selected_node.clone() {
+            let exists = match self.ui.sidebar_tab {
+                SidebarTab::Scripts => {
+                    find_script_node_by_rel(&self.script_tree, &sel).is_some()
+                }
+                _ => find_node_by_rel(&self.chapter_tree, &sel).is_some(),
+            };
+            if !exists {
+                self.ui.selected_node = None;
+            }
+        }
     }
 
     pub fn ai_discard_all_proposals(&mut self) {
@@ -776,6 +823,26 @@ impl AppState {
 
     pub fn is_expanded(&self, rel_path: &str) -> bool {
         self.ui.expanded_nodes.contains(rel_path)
+    }
+
+    pub fn is_outline_category_expanded(&self, category: OutlineCategory) -> bool {
+        !self
+            .ui
+            .collapsed_outline_categories
+            .contains(category.label())
+    }
+
+    pub fn toggle_outline_category(&mut self, category: OutlineCategory) -> Result<()> {
+        let label = category.label();
+        if self.ui.collapsed_outline_categories.contains(label) {
+            self.ui.collapsed_outline_categories.remove(label);
+        } else {
+            self.ui
+                .collapsed_outline_categories
+                .insert(label.to_string());
+        }
+        self.persist_ui_state()?;
+        Ok(())
     }
 
     /// 选中目录节点（仅高亮，不加载章节）。
@@ -1579,6 +1646,12 @@ impl AppState {
         self.ui.ai_panel_open = project.ui_state.ai_panel_open;
         self.ui.preview_panel_open = project.ui_state.preview_panel_open;
         self.ui.expanded_nodes = project.ui_state.expanded_nodes.iter().cloned().collect();
+        self.ui.collapsed_outline_categories = project
+            .ui_state
+            .collapsed_outline_categories
+            .iter()
+            .cloned()
+            .collect();
         self.ui.selected_node = None;
         self.current_chapter = None;
         self.current_chapter_path = None;
@@ -1645,6 +1718,14 @@ impl AppState {
             let mut nodes: Vec<_> = self.ui.expanded_nodes.iter().cloned().collect();
             nodes.sort();
             project.ui_state.expanded_nodes = nodes;
+            let mut collapsed: Vec<_> = self
+                .ui
+                .collapsed_outline_categories
+                .iter()
+                .cloned()
+                .collect();
+            collapsed.sort();
+            project.ui_state.collapsed_outline_categories = collapsed;
             project.ui_state.sidebar_tab = self.ui.sidebar_tab.as_str().to_string();
             project.ui_state.ai_panel_open = self.ui.ai_panel_open;
             project.ui_state.preview_panel_open = self.ui.preview_panel_open;
@@ -1861,6 +1942,63 @@ mod tests {
     }
 
     #[test]
+    fn ai_apply_delete_chapter_clears_open_document_and_tree() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("删章", now()).unwrap();
+        let rel = state
+            .create_chapter_under("", "ch-001", "第一章", now())
+            .unwrap();
+        assert!(state.current_chapter.is_some());
+        assert!(find_node_by_rel(&state.chapter_tree, &rel).is_some());
+
+        let intent_id = Uuid::from_u128(9001);
+        state.ai_enqueue_proposal(AiIntent::DeleteChapterNode {
+            intent_id,
+            rel_path: rel.clone(),
+        });
+
+        state.ai_apply_proposal(intent_id, now()).unwrap();
+
+        assert!(state.current_chapter.is_none());
+        assert!(state.current_chapter_path.is_none());
+        assert!(find_node_by_rel(&state.chapter_tree, &rel).is_none());
+        assert!(state.ai.proposals.is_empty());
+    }
+
+    #[test]
+    fn ai_apply_all_refreshes_ui_even_when_later_proposal_fails() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("批量", now()).unwrap();
+        let rel = state
+            .create_chapter_under("", "ch-001", "第一章", now())
+            .unwrap();
+        let chapter_id = state.current_chapter.as_ref().unwrap().id;
+
+        let delete_id = Uuid::from_u128(9002);
+        let bad_id = Uuid::from_u128(9003);
+        state.ai_enqueue_proposal(AiIntent::DeleteChapterNode {
+            intent_id: delete_id,
+            rel_path: rel.clone(),
+        });
+        state.ai_enqueue_proposal(AiIntent::CreateBlock {
+            intent_id: bad_id,
+            chapter_id,
+            block_type: BlockType::Narration,
+            content: "应失败".into(),
+            speaker: None,
+            after_block_id: None,
+        });
+
+        let err = state.ai_apply_all_proposals(now()).unwrap_err();
+        assert!(err.to_string().contains("proposal") || err.to_string().len() > 0);
+
+        assert!(state.current_chapter.is_none());
+        assert!(find_node_by_rel(&state.chapter_tree, &rel).is_none());
+        assert_eq!(state.ai.proposals.len(), 1);
+        assert_eq!(state.ai.proposals.iter().next().unwrap().intent.intent_id(), bad_id);
+    }
+
+    #[test]
     fn ai_auto_apply_defaults_off() {
         let (_dir, state) = state_with_temp_root();
         assert!(!state.ai.auto_apply);
@@ -1868,6 +2006,48 @@ mod tests {
         assert!(!state.ai.busy);
         assert!(state.ai.messages.is_empty());
         assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::Auto);
+        assert!(state.ai.proposals_expanded);
+    }
+
+    #[test]
+    fn toggle_ai_proposals_expanded_flips() {
+        let (_dir, mut state) = state_with_temp_root();
+        assert!(state.ai.proposals_expanded);
+        state.toggle_ai_proposals_expanded();
+        assert!(!state.ai.proposals_expanded);
+        state.toggle_ai_proposals_expanded();
+        assert!(state.ai.proposals_expanded);
+    }
+
+    #[test]
+    fn toggle_outline_category_collapses_and_persists() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("大纲折叠", now()).unwrap();
+        assert!(state.is_outline_category_expanded(OutlineCategory::Character));
+
+        state.toggle_outline_category(OutlineCategory::Character).unwrap();
+        assert!(!state.is_outline_category_expanded(OutlineCategory::Character));
+        assert!(state.is_outline_category_expanded(OutlineCategory::Background));
+
+        let project_dir = state.project_dir.clone().unwrap();
+        let config_path = state.config_path.clone();
+        let projects_root = state.config.projects_root.clone();
+
+        let mut reloaded = AppState::load_from(&config_path).unwrap();
+        reloaded.config.projects_root = projects_root;
+        reloaded.open_project(&project_dir, now()).unwrap();
+        assert!(!reloaded.is_outline_category_expanded(OutlineCategory::Character));
+    }
+
+    #[test]
+    fn set_ai_auto_apply_sets_explicit_value() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.set_ai_auto_apply(true);
+        assert!(state.ai.auto_apply);
+        state.set_ai_auto_apply(true);
+        assert!(state.ai.auto_apply);
+        state.set_ai_auto_apply(false);
+        assert!(!state.ai.auto_apply);
     }
 
     #[test]

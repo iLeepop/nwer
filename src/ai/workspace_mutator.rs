@@ -810,4 +810,58 @@ mod tests {
         assert_eq!(loaded.title, "第一章");
         assert_eq!(loaded.id, chapter_id);
     }
+
+    #[test]
+    fn workspace_apply_all_create_script_then_append_blocks() {
+        use crate::ai::{apply_all, Proposal, ProposalStore};
+        use crate::models::{ScriptBlock, ScriptBlockType};
+        use crate::storage::{
+            create_script_directory, find_node_by_script_id, load_script, resolve_script_rel,
+            scan_script_tree,
+        };
+
+        let dir = tempdir().unwrap();
+        let (project_dir, _project) = create_project(dir.path(), "测试书", now()).unwrap();
+        create_script_directory(&project_dir, "", "vol-001", 3).unwrap();
+
+        let script_id = Uuid::from_u128(501);
+        let mut store = ProposalStore::default();
+        store.push(Proposal {
+            intent: AiIntent::CreateScript {
+                intent_id: Uuid::from_u128(1),
+                title: "晋升答辩".into(),
+                parent_rel: "vol-001".into(),
+                script_id: Some(script_id),
+                name: Some("sc-001".into()),
+            },
+            stale: false,
+        });
+        store.push(Proposal {
+            intent: AiIntent::AppendScriptBlocks {
+                intent_id: Uuid::from_u128(2),
+                script_id,
+                blocks: vec![ScriptBlock::new(
+                    ScriptBlockType::Action,
+                    "王铁柱走上台。",
+                    now(),
+                )],
+            },
+            stale: false,
+        });
+
+        let mut m = WorkspaceMutator::open(&project_dir).with_now(now());
+        apply_all(&mut store, &mut m).unwrap();
+        assert!(store.is_empty());
+
+        let tree = scan_script_tree(&project_dir).unwrap();
+        let node = find_node_by_script_id(&tree, script_id).expect("script on disk");
+        assert_eq!(node.rel_path, "vol-001/sc-001.json");
+        let path = resolve_script_rel(&project_dir, &node.rel_path).unwrap();
+        let loaded = load_script(&path).unwrap();
+        assert_eq!(loaded.id, script_id);
+        assert!(
+            loaded.blocks.iter().any(|b| b.content == "王铁柱走上台。"),
+            "expected appended block"
+        );
+    }
 }

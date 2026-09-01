@@ -44,13 +44,14 @@ pub struct Workspace {
     pub(crate) speaker_input: Option<(usize, Entity<InputState>)>,
     pub(crate) character_input: Option<(usize, Entity<InputState>)>,
     pub(crate) search_input: Option<Entity<InputState>>,
-    pub(crate) ai_input: Option<Entity<InputState>>,
+    pub(crate) ai_input: Option<Entity<TextareaState>>,
     pub(crate) outline_field_name_inputs: HashMap<String, Entity<InputState>>,
     pub(crate) outline_field_value_inputs: HashMap<String, Entity<TextareaState>>,
     _edit_subscriptions: Vec<Subscription>,
     _title_subscription: Option<Subscription>,
     _search_subscription: Option<Subscription>,
     _outline_subscriptions: Vec<Subscription>,
+    _ai_input_subscription: Option<Subscription>,
     debounce_gen: u64,
     _debounce_task: Option<Task<()>>,
     _ai_task: Option<Task<()>>,
@@ -74,6 +75,7 @@ impl Workspace {
             _title_subscription: None,
             _search_subscription: None,
             _outline_subscriptions: Vec::new(),
+            _ai_input_subscription: None,
             debounce_gen: 0,
             _debounce_task: None,
             _ai_task: None,
@@ -116,6 +118,13 @@ impl Workspace {
         self._outline_subscriptions.clear();
     }
 
+    /// AI 提案落盘后重置编辑器缓存，避免仍显示已删章节/剧本。
+    pub(crate) fn reset_editor_after_ai_mutate(&mut self) {
+        self.title_input = None;
+        self.invalidate_editor_inputs();
+        self.invalidate_script_editor_inputs();
+    }
+
     pub(crate) fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_input.is_some() {
             return;
@@ -145,9 +154,23 @@ impl Workspace {
         if self.ai_input.is_some() {
             return;
         }
-        self.ai_input = Some(cx.new(|cx| {
-            InputState::new(window, cx).placeholder("向 AI 提问或下达写作指令…")
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder("向 AI 提问…（Enter 发送 · Shift+Enter 换行）")
+                .submit_on_enter(true)
+        });
+        self._ai_input_subscription = Some(cx.subscribe_in(&input, window, {
+            move |this, _state, event, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = event {
+                    if *shift {
+                        return;
+                    }
+                    this.send_ai_prompt(window, cx);
+                }
+            }
         }));
+        self.ai_input = Some(input);
     }
 
     /// 从 AI 面板发送：校验配置 → hydrate → 后台跑 Host → 回写提案。

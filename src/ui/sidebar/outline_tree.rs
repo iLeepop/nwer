@@ -34,7 +34,7 @@ pub fn render_outline_tree(state: &AppState, cx: &mut Context<'_, Workspace>) ->
                 .children(if !has_project {
                     vec![empty_hint(cx, "打开或新建项目后显示大纲")]
                 } else {
-                    render_grouped(&entries, selected_id, cx)
+                    render_grouped(&entries, selected_id, state, cx)
                 }),
         )
 }
@@ -91,22 +91,42 @@ fn toolbar(
 fn render_grouped(
     entries: &[OutlineEntry],
     selected_id: Option<Uuid>,
+    state: &AppState,
     cx: &mut Context<'_, Workspace>,
 ) -> Vec<AnyElement> {
     let mut rows = Vec::new();
     for category in OutlineCategory::all() {
+        let expanded = state.is_outline_category_expanded(category);
         let in_cat: Vec<_> = entries.iter().filter(|e| e.category == category).collect();
+        let chevron = if expanded { "▾" } else { "▴" };
         rows.push(
             div()
+                .id(SharedString::from(format!("outline-cat-{}", category.label())))
                 .px_2()
                 .pt_2()
                 .pb_1()
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(cx.theme().muted_foreground)
-                .child(category.label())
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Err(err) = this.state.toggle_outline_category(category) {
+                        eprintln!("toggle outline category failed: {err:#}");
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(chevron)
+                        .child(category.label()),
+                )
                 .into_any_element(),
         );
+        if !expanded {
+            continue;
+        }
         if in_cat.is_empty() {
             rows.push(
                 div()

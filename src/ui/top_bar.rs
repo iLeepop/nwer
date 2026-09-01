@@ -18,9 +18,6 @@ actions!(
         ToggleSidebar,
         ToggleAiPanel,
         OpenSettings,
-        // 撤销/重做：第一版依赖 GPUI Input 组件内置 undo；菜单项作占位提示
-        UndoPlaceholder,
-        RedoPlaceholder,
     ]
 );
 
@@ -99,7 +96,6 @@ pub fn render_top_bar(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl
             h_flex()
                 .gap_1()
                 .child(file_menu(can_save))
-                .child(edit_menu())
                 .child(view_menu(sidebar_label, ai_label))
                 .child(
                     Button::new("menu-settings")
@@ -126,18 +122,6 @@ fn file_menu(can_save: bool) -> impl IntoElement {
                 menu = menu.menu("保存", Box::new(SaveDocument));
             }
             menu.separator().menu("退出", Box::new(QuitApp))
-        })
-}
-
-fn edit_menu() -> impl IntoElement {
-    Button::new("menu-edit")
-        .ghost()
-        .small()
-        .label("编辑")
-        .dropdown_menu(|menu, _, _| {
-            // 第一版：撤销/重做范围限于当前文本输入；GPUI Input 自带 undo/redo。
-            menu.menu("撤销（输入框内置）", Box::new(UndoPlaceholder))
-                .menu("重做（输入框内置）", Box::new(RedoPlaceholder))
         })
 }
 

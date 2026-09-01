@@ -104,16 +104,23 @@ pub fn discard_proposal(intent_id: Uuid, store: &mut ProposalStore) -> anyhow::R
     Ok(())
 }
 
-/// 按队列顺序应用全部提案；遇错即停。
+/// 按队列顺序应用全部提案；单条失败不中断，返回最后一次错误。
 pub fn apply_all<M: ProjectMutator>(
     store: &mut ProposalStore,
     mutator: &mut M,
 ) -> anyhow::Result<()> {
     let ids = store.intent_ids();
+    let mut last_err = None;
     for id in ids {
-        apply_proposal(id, store, mutator)?;
+        if let Err(err) = apply_proposal(id, store, mutator) {
+            last_err = Some(err);
+        }
     }
-    Ok(())
+    if let Some(err) = last_err {
+        Err(err)
+    } else {
+        Ok(())
+    }
 }
 
 /// 清空提案队列。
@@ -147,17 +154,22 @@ impl EffectPolicy {
                     intent_id,
                     summary,
                     error: None,
-                },
+                    chapter_id: None,
+                    script_id: None,
+                }
+                .with_intent_fields(&intent),
                 Err(e) => ToolReceipt {
                     status: IntentStatus::Error,
                     intent_id,
                     summary,
                     error: Some(e.to_string()),
+                    chapter_id: None,
+                    script_id: None,
                 },
             }
         } else {
             store.push(Proposal {
-                intent,
+                intent: intent.clone(),
                 stale: false,
             });
             ToolReceipt {
@@ -165,7 +177,10 @@ impl EffectPolicy {
                 intent_id,
                 summary,
                 error: None,
+                chapter_id: None,
+                script_id: None,
             }
+            .with_intent_fields(&intent)
         }
     }
 }
@@ -217,7 +232,24 @@ pub fn summarize_intent(intent: &AiIntent) -> String {
         AiIntent::CreateOutlineEntry { .. } => "创建大纲条目".into(),
         AiIntent::UpdateOutlineEntry { .. } => "更新大纲条目".into(),
         AiIntent::DeleteOutlineEntry { .. } => "删除大纲条目".into(),
-        AiIntent::CreateScript { .. } => "创建剧本".into(),
+        AiIntent::CreateScript {
+            title,
+            script_id,
+            parent_rel,
+            name,
+            ..
+        } => {
+            let path = match name {
+                Some(n) if parent_rel.is_empty() => format!("{n}.json"),
+                Some(n) => format!("{parent_rel}/{n}.json"),
+                None if parent_rel.is_empty() => "(auto).json".into(),
+                None => format!("{parent_rel}/(auto).json"),
+            };
+            let id = script_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "?".into());
+            format!("创建剧本 {title} @ scripts/{path} (script_id={id})")
+        }
         AiIntent::CreateScriptDirectory { .. } => "创建剧本目录".into(),
         AiIntent::RenameScriptNode { .. } => "重命名剧本节点".into(),
         AiIntent::DeleteScriptNode { .. } => "删除剧本节点".into(),

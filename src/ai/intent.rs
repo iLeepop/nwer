@@ -256,6 +256,33 @@ pub struct ToolReceipt {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `create_chapter_file` / `copy_chapter` 等返回的可引用章节 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_id: Option<Uuid>,
+    /// `create_script` / `copy_script` 等返回的可引用剧本 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_id: Option<Uuid>,
+}
+
+impl ToolReceipt {
+    pub fn with_intent_fields(mut self, intent: &AiIntent) -> Self {
+        match intent {
+            AiIntent::CreateChapterFile { chapter_id, .. } => {
+                self.chapter_id = Some(*chapter_id);
+            }
+            AiIntent::CreateScript { script_id: Some(id), .. } => {
+                self.script_id = Some(*id);
+            }
+            AiIntent::CopyChapter { new_chapter_id, .. } => {
+                self.chapter_id = Some(*new_chapter_id);
+            }
+            AiIntent::CopyScript { new_script_id, .. } => {
+                self.script_id = Some(*new_script_id);
+            }
+            _ => {}
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +298,8 @@ mod tests {
             intent_id: Uuid::nil(),
             summary: "创建叙述块".into(),
             error: None,
+            chapter_id: None,
+            script_id: None,
         };
         let v = serde_json::to_value(&receipt).unwrap();
         assert_eq!(v["status"], "proposed");

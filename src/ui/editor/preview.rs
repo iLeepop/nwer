@@ -1,10 +1,10 @@
 //! 章节与剧本的右侧预览面板 UI。
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::services::{chapter_preview_lines, script_preview_lines};
+use crate::ui::selectable_text::selectable_plain;
 use crate::ui::Workspace;
 
 pub fn render_preview_panel(
@@ -19,8 +19,6 @@ pub fn render_preview_panel(
     } else {
         Vec::new()
     };
-
-    let is_script = workspace.state.current_script.is_some();
 
     let mut children: Vec<AnyElement> = vec![
         div()
@@ -39,19 +37,13 @@ pub fn render_preview_panel(
                 .into_any_element(),
         );
     } else {
-        for (i, line) in lines.into_iter().enumerate() {
-            children.push(
-                div()
-                    .id(SharedString::from(format!("preview-line-{i}")))
-                    .text_sm()
-                    .line_height(relative(1.7))
-                    .when(is_script && line.starts_with('（'), |el| {
-                        el.text_color(cx.theme().muted_foreground)
-                    })
-                    .child(line)
-                    .into_any_element(),
-            );
-        }
+        let body = lines.join("\n\n");
+        children.push(
+            selectable_plain("preview-body", body)
+                .text_sm()
+                .line_height(relative(1.7))
+                .into_any_element(),
+        );
     }
 
     v_flex()

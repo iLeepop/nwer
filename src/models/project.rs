@@ -23,6 +23,9 @@ impl Default for ProjectSettings {
 pub struct UiState {
     #[serde(default)]
     pub expanded_nodes: Vec<String>,
+    /// 已折叠的大纲分类标签（如「角色」）。
+    #[serde(default)]
+    pub collapsed_outline_categories: Vec<String>,
     #[serde(default = "default_sidebar_tab")]
     pub sidebar_tab: String,
     #[serde(default)]
@@ -39,6 +42,7 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             expanded_nodes: Vec::new(),
+            collapsed_outline_categories: Vec::new(),
             sidebar_tab: default_sidebar_tab(),
             ai_panel_open: false,
             preview_panel_open: false,
