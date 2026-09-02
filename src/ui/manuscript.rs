@@ -37,8 +37,6 @@ pub struct BlockVoice {
 pub enum StatTier {
     /// Focal number (chapter / script word count).
     Hero,
-    /// Supporting total (book words).
-    Secondary,
     /// Everything else.
     Meta,
 }
@@ -108,7 +106,6 @@ pub fn block_surface(voice: BlockVoice, editing: bool, selected: bool) -> BlockS
 pub fn chapter_stat_tier(label: &str) -> StatTier {
     match label {
         "本章总字数" | "剧本字数" => StatTier::Hero,
-        "全书总字数" => StatTier::Secondary,
         _ => StatTier::Meta,
     }
 }
@@ -173,7 +170,6 @@ mod tests {
     fn word_count_is_hero_metric() {
         assert_eq!(chapter_stat_tier("本章总字数"), StatTier::Hero);
         assert_eq!(chapter_stat_tier("剧本字数"), StatTier::Hero);
-        assert_eq!(chapter_stat_tier("全书总字数"), StatTier::Secondary);
         assert_eq!(chapter_stat_tier("汉字"), StatTier::Meta);
         assert_eq!(chapter_stat_tier("块数"), StatTier::Meta);
     }

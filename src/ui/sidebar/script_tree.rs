@@ -9,19 +9,9 @@ use gpui_component::{
 use crate::app::AppState;
 use crate::storage::{ScriptNodeKind, ScriptTreeNode, MoveDirection};
 use crate::ui::Workspace;
+use crate::ui::sidebar::chapter_tree::{DeleteNode, MoveDown, MoveUp, NewDirectory, RenameNode};
 
-actions!(
-    script_tree,
-    [
-        NewDirectory,
-        NewScript,
-        RenameNode,
-        DeleteNode,
-        CopyScript,
-        MoveUp,
-        MoveDown,
-    ]
-);
+actions!(script_tree, [NewScript, CopyScript]);
 
 pub fn render_script_tree(state: &AppState, cx: &mut Context<'_, Workspace>) -> impl IntoElement {
     let has_project = state.project_dir.is_some();

@@ -17,7 +17,7 @@ use crate::services::{
 };
 use crate::ai::{
     apply_all, apply_proposal, discard_all, discard_proposal, AiChatMessage, AiChatRole, AiIntent,
-    AiUiState, Proposal, WorkspaceMutator,
+    AiSessionManager, Proposal, WorkspaceMutator,
 };
 use crate::storage::{
     ChapterTreeNode, MoveDirection, RelPath, ScriptTreeNode, add_recent_project, copy_chapter,
@@ -137,8 +137,8 @@ pub struct AppState {
     pub script_multi_select: Option<ScriptMultiSelect>,
     /// 正在为该下标的 music/mood 块点选结束位置。
     pub script_ends_at_picking: Option<usize>,
-    /// AI 面板：自动应用、对话、提案队列。
-    pub ai: AiUiState,
+    /// AI 面板：会话管理、对话、提案队列。
+    pub ai: AiSessionManager,
 }
 
 impl AppState {
@@ -178,7 +178,7 @@ impl AppState {
             script_focus: ScriptFocus::Idle,
             script_multi_select: None,
             script_ends_at_picking: None,
-            ai: AiUiState::default(),
+            ai: AiSessionManager::default(),
         })
     }
 
@@ -228,24 +228,29 @@ impl AppState {
         let _ = self.persist_ui_state();
     }
 
-    pub fn toggle_ai_auto_apply(&mut self) {
-        self.ai.auto_apply = !self.ai.auto_apply;
+    pub fn toggle_ai_auto_apply(&mut self, now: DateTime<Utc>) {
+        let next = !self.ai.auto_apply();
+        self.ai.set_auto_apply(next, now);
+        let _ = self.persist_active_ai_session(now);
     }
 
-    pub fn set_ai_auto_apply(&mut self, auto_apply: bool) {
-        self.ai.auto_apply = auto_apply;
+    pub fn set_ai_auto_apply(&mut self, auto_apply: bool, now: DateTime<Utc>) {
+        self.ai.set_auto_apply(auto_apply, now);
+        let _ = self.persist_active_ai_session(now);
     }
 
     pub fn toggle_ai_proposals_expanded(&mut self) {
         self.ai.proposals_expanded = !self.ai.proposals_expanded;
     }
 
-    pub fn set_ai_max_token_tier(&mut self, tier: crate::ai::AiMaxTokenTier) {
-        self.ai.max_token_tier = tier;
+    pub fn set_ai_max_token_tier(&mut self, tier: crate::ai::AiMaxTokenTier, now: DateTime<Utc>) {
+        self.ai.set_max_token_tier(tier, now);
+        let _ = self.persist_active_ai_session(now);
     }
 
-    pub fn set_ai_agent(&mut self, agent: crate::ai::AiAgentKind) {
-        self.ai.agent = agent;
+    pub fn set_ai_agent(&mut self, agent: crate::ai::AiAgentKind, now: DateTime<Utc>) {
+        self.ai.set_agent(agent, now);
+        let _ = self.persist_active_ai_session(now);
     }
 
     pub fn ai_add_context_ref(&mut self, item: crate::ai::AiContextRef) -> bool {
@@ -262,24 +267,33 @@ impl AppState {
         self.ai.context_refs.clear();
     }
 
-    pub fn ai_push_user_message(&mut self, text: impl Into<String>) {
-        self.ai.messages.push(AiChatMessage {
+    pub fn ai_push_user_message(&mut self, text: impl Into<String>, now: DateTime<Utc>) {
+        let text = text.into();
+        let session = self.ai.ensure_active(now);
+        session.ui_messages.push(AiChatMessage {
             role: AiChatRole::User,
-            text: text.into(),
+            text,
         });
+        session.refresh_title_from_messages();
+        session.touch(now);
+        let _ = self.persist_active_ai_session(now);
     }
 
-    pub fn ai_push_assistant(&mut self, text: impl Into<String>) {
-        self.ai.messages.push(AiChatMessage {
+    pub fn ai_push_assistant(&mut self, text: impl Into<String>, now: DateTime<Utc>) {
+        let session = self.ai.ensure_active(now);
+        session.ui_messages.push(AiChatMessage {
             role: AiChatRole::Assistant,
             text: text.into(),
         });
+        session.touch(now);
+        let _ = self.persist_active_ai_session(now);
     }
 
     /// 开始流式助手气泡（空内容，后续 append delta）。
-    pub fn ai_begin_assistant_stream(&mut self) {
+    pub fn ai_begin_assistant_stream(&mut self, now: DateTime<Utc>) {
         self.ai.streaming = true;
-        self.ai.messages.push(AiChatMessage {
+        let session = self.ai.ensure_active(now);
+        session.ui_messages.push(AiChatMessage {
             role: AiChatRole::Assistant,
             text: String::new(),
         });
@@ -287,22 +301,27 @@ impl AppState {
     }
 
     /// 向当前流式助手气泡追加增量。
-    pub fn ai_append_stream_delta(&mut self, delta: &str) {
+    pub fn ai_append_stream_delta(&mut self, delta: &str, now: DateTime<Utc>) {
         if !self.ai.streaming || delta.is_empty() {
             return;
         }
-        if let Some(m) = self.ai.messages.last_mut() {
-            if m.role == AiChatRole::Assistant {
-                m.text.push_str(delta);
+        if let Some(session) = self.ai.active_mut() {
+            if let Some(m) = session.ui_messages.last_mut() {
+                if m.role == AiChatRole::Assistant {
+                    m.text.push_str(delta);
+                    session.touch(now);
+                }
             }
         }
     }
 
-    pub fn ai_enqueue_proposal(&mut self, intent: AiIntent) {
-        self.ai.proposals.push(Proposal {
+    pub fn ai_enqueue_proposal(&mut self, intent: AiIntent, now: DateTime<Utc>) {
+        let session = self.ai.ensure_active(now);
+        session.proposals.push(Proposal {
             intent,
             stale: false,
         });
+        session.touch(now);
     }
 
     /// 有打开项目时经 WorkspaceMutator 落盘；否则走内存镜像。
@@ -311,16 +330,27 @@ impl AppState {
             self.flush_save(SaveTrigger::BeforeLeave, now)?;
             let project_dir = self.project_dir.clone().expect("project_dir");
             let mut mutator = WorkspaceMutator::open(project_dir).with_now(now);
-            let apply_result = apply_proposal(intent_id, &mut self.ai.proposals, &mut mutator);
+            let apply_result =
+                apply_proposal(intent_id, self.ai.proposals_mut(), &mut mutator);
             self.refresh_after_ai_mutate()?;
-            apply_result
+            apply_result?;
         } else {
-            apply_proposal(intent_id, &mut self.ai.proposals, &mut self.ai.mutator)
+            self.ai.apply_proposal_in_memory(intent_id)?;
         }
+        if let Some(session) = self.ai.active_mut() {
+            session.touch(now);
+        }
+        let _ = self.persist_active_ai_session(now);
+        Ok(())
     }
 
-    pub fn ai_discard_proposal(&mut self, intent_id: Uuid) -> Result<()> {
-        discard_proposal(intent_id, &mut self.ai.proposals)
+    pub fn ai_discard_proposal(&mut self, intent_id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        discard_proposal(intent_id, self.ai.proposals_mut())?;
+        if let Some(session) = self.ai.active_mut() {
+            session.touch(now);
+        }
+        let _ = self.persist_active_ai_session(now);
+        Ok(())
     }
 
     pub fn ai_apply_all_proposals(&mut self, now: DateTime<Utc>) -> Result<()> {
@@ -328,12 +358,17 @@ impl AppState {
             self.flush_save(SaveTrigger::BeforeLeave, now)?;
             let project_dir = self.project_dir.clone().expect("project_dir");
             let mut mutator = WorkspaceMutator::open(project_dir).with_now(now);
-            let apply_result = apply_all(&mut self.ai.proposals, &mut mutator);
+            let apply_result = apply_all(self.ai.proposals_mut(), &mut mutator);
             self.refresh_after_ai_mutate()?;
-            apply_result
+            apply_result?;
         } else {
-            apply_all(&mut self.ai.proposals, &mut self.ai.mutator)
+            self.ai.apply_all_in_memory()?;
         }
+        if let Some(session) = self.ai.active_mut() {
+            session.touch(now);
+        }
+        let _ = self.persist_active_ai_session(now);
+        Ok(())
     }
 
     fn refresh_after_ai_mutate(&mut self) -> Result<()> {
@@ -415,18 +450,109 @@ impl AppState {
         }
     }
 
-    pub fn ai_discard_all_proposals(&mut self) {
-        discard_all(&mut self.ai.proposals);
+    pub fn ai_discard_all_proposals(&mut self, now: DateTime<Utc>) {
+        discard_all(self.ai.proposals_mut());
+        if let Some(session) = self.ai.active_mut() {
+            session.touch(now);
+        }
+        let _ = self.persist_active_ai_session(now);
+    }
+
+    fn persist_active_ai_session(&self, _now: DateTime<Utc>) -> Result<()> {
+        let Some(project_dir) = self.project_dir.as_ref() else {
+            return Ok(());
+        };
+        crate::storage::persist_ai_state(project_dir, self.ai.active(), self.ai.active_id())
+    }
+
+    fn load_ai_sessions_for_project(&mut self, project_dir: &Path) -> Result<()> {
+        let sessions = crate::storage::load_sessions(project_dir)?;
+        let active_id = crate::storage::load_active_session_id(project_dir)?
+            .filter(|id| sessions.iter().any(|s| s.id == *id))
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .max_by_key(|s| s.updated_at)
+                    .map(|s| s.id)
+            });
+        self.ai.replace_loaded(sessions, active_id);
+        Ok(())
+    }
+
+    fn prune_ai_sessions_if_needed(&mut self) -> Result<()> {
+        let Some(project_dir) = self.project_dir.clone() else {
+            return Ok(());
+        };
+        let deleted = crate::storage::prune_old_sessions(
+            &project_dir,
+            crate::ai::MAX_SESSIONS_PER_PROJECT,
+        )?;
+        for id in deleted {
+            self.ai.remove_session(id);
+        }
+        Ok(())
+    }
+
+    /// 新建 AI 会话（busy 时拒绝）。
+    pub fn ai_new_session(&mut self, now: DateTime<Utc>) -> Result<Uuid> {
+        if self.ai.busy {
+            bail!("AI 正在生成中，请稍后再新建对话");
+        }
+        let _ = self.persist_active_ai_session(now);
+        let id = self.ai.create_session(now);
+        self.persist_active_ai_session(now)?;
+        self.prune_ai_sessions_if_needed()?;
+        Ok(id)
+    }
+
+    /// 切换到已有会话。
+    pub fn ai_switch_session(&mut self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        if self.ai.busy {
+            bail!("AI 正在生成中，请稍后再切换对话");
+        }
+        if self.ai.active_id() == Some(id) {
+            return Ok(());
+        }
+        let _ = self.persist_active_ai_session(now);
+        self.ai.switch_to(id)?;
+        self.persist_active_ai_session(now)
+    }
+
+    /// 删除会话；若删光则自动新建。
+    pub fn ai_delete_session(&mut self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        if self.ai.busy {
+            bail!("AI 正在生成中，请稍后再删除对话");
+        }
+        let _ = self.persist_active_ai_session(now);
+        if self.ai.remove_session(id).is_some() {
+            if let Some(project_dir) = self.project_dir.as_ref() {
+                crate::storage::delete_session_file(project_dir, id)?;
+            }
+        }
+        if self.ai.active_id().is_none() {
+            self.ai.create_session(now);
+        }
+        self.persist_active_ai_session(now)
+    }
+
+    /// 重命名当前 active 会话。
+    pub fn ai_rename_active_session(
+        &mut self,
+        title: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.ai.rename_active(title, now)?;
+        self.persist_active_ai_session(now)
     }
 
     /// 发送用户输入。未配置时提示；已配置时由 Workspace 异步跑 Host（本方法仅作 stub/测试）。
-    pub fn ai_send_user_input(&mut self, text: impl Into<String>) {
+    pub fn ai_send_user_input(&mut self, text: impl Into<String>, now: DateTime<Utc>) {
         let text = text.into();
         if !text.is_empty() {
-            self.ai_push_user_message(&text);
+            self.ai_push_user_message(&text, now);
         }
         if let Err(err) = crate::ai::validate_ai_ready(self.ai_settings()) {
-            self.ai_push_assistant(format!("{err:#}"));
+            self.ai_push_assistant(format!("{err:#}"), now);
             self.ai.status_message = Some(err.to_string());
             return;
         }
@@ -439,35 +565,54 @@ impl AppState {
     pub fn ai_ingest_host_result(
         &mut self,
         reply: String,
+        llm_history: Vec<rai_l::llm::Message>,
         mut proposals: crate::ai::ProposalStore,
         ui_commands: Vec<crate::ai::AiUiCommand>,
+        lean_focus: Option<crate::ai::StoredLeanFocus>,
         now: DateTime<Utc>,
     ) -> Result<()> {
         self.ai.busy = false;
         self.ai.streaming = false;
         self.ai_clear_context_refs();
-        match self.ai.messages.last_mut() {
-            Some(m) if m.role == AiChatRole::Assistant => {
-                if m.text.is_empty() {
-                    m.text = reply;
+        let should_auto_apply = {
+            let session = self.ai.ensure_active(now);
+            session.llm_messages = crate::ai::truncate_llm_history(
+                llm_history,
+                crate::ai::MAX_LLM_HISTORY_MESSAGES,
+            );
+            session.last_lean_focus = lean_focus;
+            match session.ui_messages.last_mut() {
+                Some(m) if m.role == AiChatRole::Assistant => {
+                    if m.text.is_empty() {
+                        m.text = reply;
+                    }
+                }
+                _ => {
+                    session.ui_messages.push(AiChatMessage {
+                        role: AiChatRole::Assistant,
+                        text: reply,
+                    });
                 }
             }
-            _ => self.ai_push_assistant(reply),
-        }
-        for id in proposals.intent_ids() {
-            if let Some(p) = proposals.remove(id) {
-                self.ai.proposals.push(p);
+            for id in proposals.intent_ids() {
+                if let Some(p) = proposals.remove(id) {
+                    session.proposals.push(p);
+                }
             }
-        }
-        if self.ai.auto_apply && !self.ai.proposals.is_empty() {
+            session.touch(now);
+            session.auto_apply && !session.proposals.is_empty()
+        };
+        if should_auto_apply {
             self.ai_apply_all_proposals(now)?;
             self.ai.status_message = Some("已自动应用提案".into());
-        } else if self.ai.proposals.is_empty() {
+        } else if self.ai.proposals().is_empty() {
             self.ai.status_message = None;
         } else {
-            self.ai.status_message = Some(format!("有 {} 条提案待确认", self.ai.proposals.len()));
+            self.ai.status_message =
+                Some(format!("有 {} 条提案待确认", self.ai.proposals().len()));
         }
         self.ai_apply_ui_commands(ui_commands, now)?;
+        let _ = self.persist_active_ai_session(now);
         Ok(())
     }
 
@@ -512,17 +657,25 @@ impl AppState {
         }
     }
 
-    pub fn ai_fail_run(&mut self, err: impl std::fmt::Display) {
+    pub fn ai_fail_run(&mut self, err: impl std::fmt::Display, now: DateTime<Utc>) {
         self.ai.busy = false;
         self.ai.streaming = false;
         let msg = format!("{err:#}");
-        match self.ai.messages.last_mut() {
+        let session = self.ai.ensure_active(now);
+        match session.ui_messages.last_mut() {
             Some(m) if m.role == AiChatRole::Assistant && m.text.is_empty() => {
                 m.text = format!("错误：{msg}");
             }
-            _ => self.ai_push_assistant(format!("错误：{msg}")),
+            _ => {
+                session.ui_messages.push(AiChatMessage {
+                    role: AiChatRole::Assistant,
+                    text: format!("错误：{msg}"),
+                });
+            }
         }
+        session.touch(now);
         self.ai.status_message = Some(msg);
+        let _ = self.persist_active_ai_session(now);
     }
 
     pub fn toggle_preview_panel(&mut self) {
@@ -1742,6 +1895,8 @@ impl AppState {
         project: Project,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        let _ = self.persist_active_ai_session(now);
+
         self.ui.sidebar_tab = SidebarTab::parse(&project.ui_state.sidebar_tab);
         self.ui.ai_panel_open = project.ui_state.ai_panel_open;
         self.ui.preview_panel_open = project.ui_state.preview_panel_open;
@@ -1768,6 +1923,10 @@ impl AppState {
         self.script_multi_select = None;
         self.search_query.clear();
         self.full_text_hits.clear();
+
+        // 切换项目前 persist 由调用方 flush；此处加载目标项目 AI 会话
+        self.ai = AiSessionManager::default();
+        self.load_ai_sessions_for_project(&project_dir)?;
 
         let path_str = project_dir.to_string_lossy().into_owned();
         add_recent_project(&mut self.config, path_str, project.title.clone(), now);
@@ -2055,14 +2214,14 @@ mod tests {
         state.ai_enqueue_proposal(AiIntent::DeleteChapterNode {
             intent_id,
             rel_path: rel.clone(),
-        });
+        }, now());
 
         state.ai_apply_proposal(intent_id, now()).unwrap();
 
         assert!(state.current_chapter.is_none());
         assert!(state.current_chapter_path.is_none());
         assert!(find_node_by_rel(&state.chapter_tree, &rel).is_none());
-        assert!(state.ai.proposals.is_empty());
+        assert!(state.ai.proposals().is_empty());
     }
 
     #[test]
@@ -2079,7 +2238,7 @@ mod tests {
         state.ai_enqueue_proposal(AiIntent::DeleteChapterNode {
             intent_id: delete_id,
             rel_path: rel.clone(),
-        });
+        }, now());
         state.ai_enqueue_proposal(AiIntent::CreateBlock {
             intent_id: bad_id,
             chapter_id,
@@ -2087,25 +2246,25 @@ mod tests {
             content: "应失败".into(),
             speaker: None,
             after_block_id: None,
-        });
+        }, now());
 
         let err = state.ai_apply_all_proposals(now()).unwrap_err();
         assert!(err.to_string().contains("proposal") || err.to_string().len() > 0);
 
         assert!(state.current_chapter.is_none());
         assert!(find_node_by_rel(&state.chapter_tree, &rel).is_none());
-        assert_eq!(state.ai.proposals.len(), 1);
-        assert_eq!(state.ai.proposals.iter().next().unwrap().intent.intent_id(), bad_id);
+        assert_eq!(state.ai.proposals().len(), 1);
+        assert_eq!(state.ai.proposals().iter().next().unwrap().intent.intent_id(), bad_id);
     }
 
     #[test]
     fn ai_auto_apply_defaults_off() {
         let (_dir, state) = state_with_temp_root();
-        assert!(!state.ai.auto_apply);
-        assert!(state.ai.proposals.is_empty());
+        assert!(!state.ai.auto_apply());
+        assert!(state.ai.proposals().is_empty());
         assert!(!state.ai.busy);
-        assert!(state.ai.messages.is_empty());
-        assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::Auto);
+        assert!(state.ai.messages().is_empty());
+        assert_eq!(state.ai.max_token_tier(), crate::ai::AiMaxTokenTier::Auto);
         assert!(state.ai.proposals_expanded);
     }
 
@@ -2142,31 +2301,31 @@ mod tests {
     #[test]
     fn set_ai_auto_apply_sets_explicit_value() {
         let (_dir, mut state) = state_with_temp_root();
-        state.set_ai_auto_apply(true);
-        assert!(state.ai.auto_apply);
-        state.set_ai_auto_apply(true);
-        assert!(state.ai.auto_apply);
-        state.set_ai_auto_apply(false);
-        assert!(!state.ai.auto_apply);
+        state.set_ai_auto_apply(true, now());
+        assert!(state.ai.auto_apply());
+        state.set_ai_auto_apply(true, now());
+        assert!(state.ai.auto_apply());
+        state.set_ai_auto_apply(false, now());
+        assert!(!state.ai.auto_apply());
     }
 
     #[test]
     fn set_ai_max_token_tier_updates_session_state() {
         let (_dir, mut state) = state_with_temp_root();
-        state.set_ai_max_token_tier(crate::ai::AiMaxTokenTier::High);
-        assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::High);
-        state.set_ai_max_token_tier(crate::ai::AiMaxTokenTier::Low);
-        assert_eq!(state.ai.max_token_tier, crate::ai::AiMaxTokenTier::Low);
+        state.set_ai_max_token_tier(crate::ai::AiMaxTokenTier::High, now());
+        assert_eq!(state.ai.max_token_tier(), crate::ai::AiMaxTokenTier::High);
+        state.set_ai_max_token_tier(crate::ai::AiMaxTokenTier::Low, now());
+        assert_eq!(state.ai.max_token_tier(), crate::ai::AiMaxTokenTier::Low);
     }
 
     #[test]
     fn set_ai_agent_updates_session_state() {
         let (_dir, mut state) = state_with_temp_root();
-        assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Default);
-        state.set_ai_agent(crate::ai::AiAgentKind::Writer);
-        assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Writer);
-        state.set_ai_agent(crate::ai::AiAgentKind::Director);
-        assert_eq!(state.ai.agent, crate::ai::AiAgentKind::Director);
+        assert_eq!(state.ai.agent(), crate::ai::AiAgentKind::Default);
+        state.set_ai_agent(crate::ai::AiAgentKind::Writer, now());
+        assert_eq!(state.ai.agent(), crate::ai::AiAgentKind::Writer);
+        state.set_ai_agent(crate::ai::AiAgentKind::Director, now());
+        assert_eq!(state.ai.agent(), crate::ai::AiAgentKind::Director);
     }
 
     #[test]
@@ -2184,8 +2343,10 @@ mod tests {
         state
             .ai_ingest_host_result(
                 "ok".into(),
+                Vec::new(),
                 crate::ai::ProposalStore::default(),
                 Vec::new(),
+                None,
                 now(),
             )
             .unwrap();
@@ -2195,11 +2356,11 @@ mod tests {
     #[test]
     fn toggle_ai_auto_apply_flips() {
         let (_dir, mut state) = state_with_temp_root();
-        assert!(!state.ai.auto_apply);
-        state.toggle_ai_auto_apply();
-        assert!(state.ai.auto_apply);
-        state.toggle_ai_auto_apply();
-        assert!(!state.ai.auto_apply);
+        assert!(!state.ai.auto_apply());
+        state.toggle_ai_auto_apply(now());
+        assert!(state.ai.auto_apply());
+        state.toggle_ai_auto_apply(now());
+        assert!(!state.ai.auto_apply());
     }
 
     #[test]
@@ -2215,11 +2376,11 @@ mod tests {
             content: "新段落".into(),
             speaker: None,
             after_block_id: None,
-        });
+        }, now());
 
         state.ai_apply_proposal(intent_id, now()).unwrap();
 
-        assert!(state.ai.proposals.is_empty());
+        assert!(state.ai.proposals().is_empty());
         assert_eq!(
             state.ai.mutator.chapter_blocks(chapter_id).unwrap().len(),
             1
@@ -2242,11 +2403,11 @@ mod tests {
             content: "从提案写入".into(),
             speaker: None,
             after_block_id: None,
-        });
+        }, now());
 
         state.ai_apply_proposal(intent_id, now()).unwrap();
 
-        assert!(state.ai.proposals.is_empty());
+        assert!(state.ai.proposals().is_empty());
         let chapter = state.current_chapter.as_ref().expect("chapter still open");
         assert!(
             chapter.blocks.iter().any(|b| b.content == "从提案写入"),
@@ -2274,11 +2435,11 @@ mod tests {
             content: "不该落盘".into(),
             speaker: None,
             after_block_id: None,
-        });
+        }, now());
 
-        state.ai_discard_proposal(intent_id).unwrap();
+        state.ai_discard_proposal(intent_id, now()).unwrap();
 
-        assert!(state.ai.proposals.is_empty());
+        assert!(state.ai.proposals().is_empty());
         assert!(
             state
                 .ai
@@ -2292,13 +2453,13 @@ mod tests {
     #[test]
     fn ai_send_without_llm_does_not_pretend_success() {
         let (_dir, mut state) = state_with_temp_root();
-        state.ai_send_user_input("写一段叙述");
+        state.ai_send_user_input("写一段叙述", now());
 
-        assert_eq!(state.ai.messages[0].text, "写一段叙述");
+        assert_eq!(state.ai.messages()[0].text, "写一段叙述");
         assert!(
             state
                 .ai
-                .messages
+                .messages()
                 .iter()
                 .any(|m| m.text.contains("API Key") || m.text.contains("模型"))
                 || state
@@ -2307,7 +2468,7 @@ mod tests {
                     .as_deref()
                     .is_some_and(|s| s.contains("API Key") || s.contains("模型")),
             "must surface missing LLM config, got messages={:?} status={:?}",
-            state.ai.messages,
+            state.ai.messages(),
             state.ai.status_message
         );
     }
@@ -2315,23 +2476,25 @@ mod tests {
     #[test]
     fn ai_stream_delta_appends_to_assistant_bubble() {
         let (_dir, mut state) = state_with_temp_root();
-        state.ai_begin_assistant_stream();
-        state.ai_append_stream_delta("你好");
-        state.ai_append_stream_delta("，世界");
-        assert_eq!(state.ai.messages.last().unwrap().text, "你好，世界");
+        state.ai_begin_assistant_stream(now());
+        state.ai_append_stream_delta("你好", now());
+        state.ai_append_stream_delta("，世界", now());
+        assert_eq!(state.ai.messages().last().unwrap().text, "你好，世界");
         assert!(state.ai.streaming);
 
         state
             .ai_ingest_host_result(
                 "ignored-when-nonempty".into(),
+                Vec::new(),
                 crate::ai::ProposalStore::default(),
                 Vec::new(),
+                None,
                 now(),
             )
             .unwrap();
         assert!(!state.ai.streaming);
-        assert_eq!(state.ai.messages.last().unwrap().text, "你好，世界");
-        assert_eq!(state.ai.messages.iter().filter(|m| m.role == AiChatRole::Assistant).count(), 1);
+        assert_eq!(state.ai.messages().last().unwrap().text, "你好，世界");
+        assert_eq!(state.ai.messages().iter().filter(|m| m.role == AiChatRole::Assistant).count(), 1);
     }
 
     #[test]
@@ -2354,12 +2517,12 @@ mod tests {
         });
 
         state
-            .ai_ingest_host_result("好的".into(), store, Vec::new(), now())
+            .ai_ingest_host_result("好的".into(), Vec::new(), store, Vec::new(), None, now())
             .unwrap();
 
         assert!(!state.ai.busy);
-        assert_eq!(state.ai.messages.last().unwrap().text, "好的");
-        assert_eq!(state.ai.proposals.len(), 1);
+        assert_eq!(state.ai.messages().last().unwrap().text, "好的");
+        assert_eq!(state.ai.proposals().len(), 1);
         assert!(
             state
                 .ai
@@ -2367,6 +2530,53 @@ mod tests {
                 .as_deref()
                 .is_some_and(|s| s.contains("1"))
         );
+    }
+
+    #[test]
+    fn ai_new_session_switches_active_and_persists() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("多会话", now()).unwrap();
+        state.ai_push_user_message("第一条", now());
+        let id1 = state.ai.active_id().unwrap();
+        let id2 = state.ai_new_session(now()).unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(state.ai.active_id(), Some(id2));
+        assert!(state.ai.messages().is_empty());
+        state.ai_switch_session(id1, now()).unwrap();
+        assert_eq!(state.ai.messages()[0].text, "第一条");
+    }
+
+    #[test]
+    fn ai_session_persists_across_project_reopen() {
+        let (_dir, mut state) = state_with_temp_root();
+        state.new_project("会话持久化", now()).unwrap();
+        state.ai_push_user_message("记住这句", now());
+        state
+            .ai_ingest_host_result(
+                "好的".into(),
+                vec![rai_l::llm::Message::new(
+                    rai_l::llm::Role::User,
+                    "记住这句",
+                )],
+                crate::ai::ProposalStore::default(),
+                Vec::new(),
+                None,
+                now(),
+            )
+            .unwrap();
+
+        let project_dir = state.project_dir.clone().unwrap();
+        let config_path = state.config_path.clone();
+        let projects_root = state.config.projects_root.clone();
+        assert!(crate::storage::ai_sessions_dir(&project_dir).exists());
+
+        let mut reloaded = AppState::load_from(&config_path).unwrap();
+        reloaded.config.projects_root = projects_root;
+        reloaded.open_project(&project_dir, now()).unwrap();
+
+        assert_eq!(reloaded.ai.messages().len(), 2);
+        assert_eq!(reloaded.ai.messages()[0].text, "记住这句");
+        assert_eq!(reloaded.ai.llm_messages().len(), 1);
     }
 
     #[test]

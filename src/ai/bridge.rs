@@ -5,6 +5,7 @@ use rai_l::llm::{Provider, RaiLLM, RaiLLMArgs};
 use uuid::Uuid;
 
 use crate::ai::host::{LeanContext, LeanFocus, LeanSelection};
+use crate::ai::session::StoredLeanFocus;
 use crate::ai::mutator::InMemoryMutator;
 use crate::ai::provider::{ChapterContext, ProjectContext};
 use crate::ai::ui_state::AiMaxTokenTier;
@@ -224,6 +225,29 @@ pub fn chapter_context_from_app(state: &AppState) -> Option<ChapterContext> {
         title: ch.title.clone(),
         status: ch.meta.status.clone(),
     })
+}
+
+/// 从瘦上下文提取可持久化的焦点快照。
+pub fn stored_lean_focus_from_lean(lean: &LeanContext) -> Option<StoredLeanFocus> {
+    match &lean.focus {
+        Some(LeanFocus::Chapter { id, title }) => Some(StoredLeanFocus::Chapter {
+            id: *id,
+            title: title.clone(),
+        }),
+        Some(LeanFocus::Script { id, title }) => Some(StoredLeanFocus::Script {
+            id: *id,
+            title: title.clone(),
+        }),
+        None => None,
+    }
+}
+
+/// 焦点相对上次 run 是否变化。
+pub fn lean_focus_changed(
+    last: &Option<StoredLeanFocus>,
+    current: &Option<StoredLeanFocus>,
+) -> bool {
+    last != current
 }
 
 #[cfg(test)]

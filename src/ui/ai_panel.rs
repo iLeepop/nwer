@@ -3,7 +3,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _, button::Button,
-    button::ButtonVariants as _, h_flex, input::Textarea, menu::DropdownMenu as _,
+    button::ButtonVariants as _, h_flex, input::Input, input::Textarea, menu::DropdownMenu as _,
     menu::PopupMenuItem, v_flex,
 };
 
@@ -22,23 +22,23 @@ pub fn render_ai_panel(
 ) -> impl IntoElement {
     workspace.ensure_ai_input(window, cx);
 
-    let auto_apply = workspace.state.ai.auto_apply;
+    let auto_apply = workspace.state.ai.auto_apply();
     let busy = workspace.state.ai.busy;
-    let max_token_tier = workspace.state.ai.max_token_tier;
-    let agent = workspace.state.ai.agent;
+    let max_token_tier = workspace.state.ai.max_token_tier();
+    let agent = workspace.state.ai.agent();
     let proposals_expanded = workspace.state.ai.proposals_expanded;
     let status = workspace.state.ai.status_message.clone();
     let messages: Vec<(AiChatRole, String)> = workspace
         .state
         .ai
-        .messages
+        .messages()
         .iter()
         .map(|m| (m.role, m.text.clone()))
         .collect();
     let proposals: Vec<(uuid::Uuid, String, bool)> = workspace
         .state
         .ai
-        .proposals
+        .proposals()
         .iter()
         .map(|p| {
             let summary = summarize_intent(&p.intent);
@@ -61,6 +61,10 @@ pub fn render_ai_panel(
     let tier_label = max_token_tier.label();
     let agent_label = agent.label();
     let context_refs = workspace.state.ai.context_refs.clone();
+    let session_title = workspace.state.ai.active_title();
+    let session_summaries = workspace.state.ai.list_summaries();
+    let active_session_id = workspace.state.ai.active_id();
+    let renaming_session = workspace.ai_renaming_session;
 
     v_flex()
         .id("ai-panel")
@@ -68,21 +72,16 @@ pub fn render_ai_panel(
         .bg(cx.theme().background)
         .border_l_1()
         .border_color(cx.theme().border)
-        .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .px_3()
-                .pt_2()
-                .pb_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(cx.theme().muted_foreground)
-                        .child("助手"),
-                ),
-        )
+        .child(render_session_header(
+            workspace,
+            session_title,
+            session_summaries,
+            active_session_id,
+            renaming_session,
+            busy,
+            window,
+            cx,
+        ))
         .children(status.map(|msg| {
             div()
                 .px_3()
@@ -138,6 +137,148 @@ pub fn render_ai_panel(
                     cx,
                 )),
         )
+}
+
+fn format_session_time(updated: chrono::DateTime<Utc>) -> String {
+    updated.format("%m-%d %H:%M").to_string()
+}
+
+fn render_session_header(
+    workspace: &mut Workspace,
+    session_title: String,
+    session_summaries: Vec<crate::ai::AiSessionSummary>,
+    active_session_id: Option<uuid::Uuid>,
+    renaming_session: bool,
+    busy: bool,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) -> impl IntoElement {
+    let workspace_entity = cx.entity();
+
+    h_flex()
+        .id("ai-session-header")
+        .w_full()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .pt_2()
+        .pb_1()
+        .child(
+            Button::new("ai-new-session")
+                .xsmall()
+                .label("+ 新对话")
+                .disabled(busy)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Err(err) = this.state.ai_new_session(Utc::now()) {
+                        this.state.ai.status_message = Some(format!("{err:#}"));
+                    }
+                    this.cancel_ai_session_rename(window, cx);
+                    cx.notify();
+                })),
+        )
+        .child(if renaming_session {
+            workspace.ensure_ai_session_title_input(window, cx);
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .items_center()
+                .child(
+                    workspace
+                        .ai_session_title_input
+                        .clone()
+                        .map(|input| {
+                            Input::new(&input)
+                                .small()
+                                .w_full()
+                                .into_any_element()
+                        })
+                        .unwrap_or_else(|| {
+                            div()
+                                .text_xs()
+                                .child("…")
+                                .into_any_element()
+                        }),
+                )
+                .child(
+                    Button::new("ai-rename-cancel")
+                        .ghost()
+                        .xsmall()
+                        .label("取消")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_ai_session_rename(window, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else {
+            Button::new("ai-session-picker")
+                .xsmall()
+                .label(session_title.as_str())
+                .disabled(busy)
+                .dropdown_menu({
+                    let workspace_entity = workspace_entity.clone();
+                    move |menu, _, _| {
+                        let mut menu = menu;
+                        for summary in &session_summaries {
+                            let ws = workspace_entity.clone();
+                            let id = summary.id;
+                            let mark = if active_session_id == Some(id) {
+                                " ✓"
+                            } else {
+                                ""
+                            };
+                            let label = format!(
+                                "{}{} · {}",
+                                summary.title,
+                                mark,
+                                format_session_time(summary.updated_at)
+                            );
+                            menu = menu.item(
+                                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                    ws.update(cx, |this, cx| {
+                                        if let Err(err) =
+                                            this.state.ai_switch_session(id, Utc::now())
+                                        {
+                                            this.state.ai.status_message =
+                                                Some(format!("{err:#}"));
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                            );
+                        }
+                        let ws_rename = workspace_entity.clone();
+                        let ws_delete = workspace_entity.clone();
+                        menu = menu
+                            .item(
+                                PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
+                                    ws_rename.update(cx, |this, cx| {
+                                        this.begin_ai_session_rename(window, cx);
+                                        cx.notify();
+                                    });
+                                }),
+                            )
+                            .item(
+                                PopupMenuItem::new("删除当前对话").on_click(move |_, _, cx| {
+                                    ws_delete.update(cx, |this, cx| {
+                                        if let Some(id) = this.state.ai.active_id() {
+                                            if let Err(err) =
+                                                this.state.ai_delete_session(id, Utc::now())
+                                            {
+                                                this.state.ai.status_message =
+                                                    Some(format!("{err:#}"));
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                            );
+                        menu
+                    }
+                })
+                .into_any_element()
+        })
 }
 
 fn render_message_block(
@@ -355,7 +496,8 @@ fn render_toolbar(
                             PopupMenuItem::new(format!("始终询问{ask_mark}")).on_click(
                                 move |_, _, cx| {
                                     ws_ask.update(cx, |this, cx| {
-                                        this.state.set_ai_auto_apply(false);
+                                        this.state
+                                            .set_ai_auto_apply(false, Utc::now());
                                         cx.notify();
                                     });
                                 },
@@ -365,7 +507,7 @@ fn render_toolbar(
                             PopupMenuItem::new(format!("始终允许{allow_mark}")).on_click(
                                 move |_, _, cx| {
                                     ws_allow.update(cx, |this, cx| {
-                                        this.state.set_ai_auto_apply(true);
+                                        this.state.set_ai_auto_apply(true, Utc::now());
                                         cx.notify();
                                     });
                                 },
@@ -390,7 +532,8 @@ fn render_toolbar(
                                 PopupMenuItem::new(format!("{}{mark}", tier.label())).on_click(
                                     move |_, _, cx| {
                                         workspace.update(cx, |this, cx| {
-                                            this.state.set_ai_max_token_tier(tier);
+                                            this.state
+                                                .set_ai_max_token_tier(tier, Utc::now());
                                             cx.notify();
                                         });
                                     },
@@ -418,7 +561,7 @@ fn render_toolbar(
                                 PopupMenuItem::new(format!("{}{mark}", kind.label())).on_click(
                                     move |_, _, cx| {
                                         workspace.update(cx, |this, cx| {
-                                            this.state.set_ai_agent(kind);
+                                            this.state.set_ai_agent(kind, Utc::now());
                                             cx.notify();
                                         });
                                     },
@@ -519,7 +662,7 @@ fn render_proposals_float(
                                 .label("全部放弃")
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.ai_discard_all_proposals();
+                                    this.state.ai_discard_all_proposals(Utc::now());
                                     cx.notify();
                                 })),
                         ),
@@ -577,7 +720,7 @@ fn render_proposals_float(
                                             .disabled(busy)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if let Err(err) =
-                                                    this.state.ai_discard_proposal(id)
+                                                    this.state.ai_discard_proposal(id, Utc::now())
                                                 {
                                                     this.state.ai.status_message =
                                                         Some(format!("{err:#}"));

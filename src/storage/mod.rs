@@ -1,3 +1,4 @@
+mod ai_session_store;
 mod atomic_write;
 mod chapter_store;
 mod chapter_tree;
@@ -7,6 +8,11 @@ mod project_store;
 mod script_store;
 mod script_tree;
 
+pub use ai_session_store::{
+    ai_sessions_dir, delete_session_file, load_active_session_id, load_sessions,
+    persist_ai_state, persist_session_if_active, prune_old_sessions, save_active_session_id,
+    save_session,
+};
 pub use atomic_write::atomic_write;
 pub use chapter_store::{load_chapter, save_chapter};
 pub use chapter_tree::{

@@ -8,14 +8,21 @@ mod mutator;
 mod prompts;
 mod provider;
 mod tools;
+mod session;
 mod ui_command;
 mod ui_state;
 mod workspace_mutator;
 
+pub use session::{
+    truncate_llm_history, AiSession, AiSessionManager, AiSessionSummary, StoredLeanFocus,
+    MAX_LLM_HISTORY_MESSAGES, MAX_SESSIONS_PER_PROJECT,
+};
+
 pub use actions::action_prompt;
 pub use bridge::{
     build_llm, chapter_context_from_app, hydrate_shared_ctx, lean_context_from_app,
-    provider_from_settings, resolve_max_tokens, validate_ai_ready, MAX_TOKENS_HIGH,
+    lean_focus_changed, provider_from_settings, resolve_max_tokens, stored_lean_focus_from_lean,
+    validate_ai_ready, MAX_TOKENS_HIGH,
 };
 pub use context_ref::{
     format_attached_refs, push_unique, AiContextKind, AiContextRef,
@@ -25,8 +32,11 @@ pub use effect::{
     Proposal, ProposalStore,
 };
 pub use ui_command::AiUiCommand;
-pub use ui_state::{AiAgentKind, AiChatMessage, AiChatRole, AiMaxTokenTier, AiUiState};
-pub use host::{format_lean_context, AiSessionHost, LeanContext, LeanFocus, LeanSelection};
+pub use ui_state::{AiAgentKind, AiChatMessage, AiChatRole, AiMaxTokenTier};
+pub use host::{
+    compose_user_message_for_turn, format_lean_context, AiSessionHost, LeanContext, LeanFocus,
+    LeanSelection,
+};
 pub use intent::*;
 pub use mutator::{InMemoryMutator, ProjectMutator};
 pub use workspace_mutator::WorkspaceMutator;

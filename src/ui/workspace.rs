@@ -33,7 +33,7 @@ use crate::ui::editor::{
 use crate::ui::sidebar::chapter_tree::{
     CopyChapter, DeleteNode, MoveDown, MoveUp, NewChapter, NewDirectory, RenameNode,
 };
-use crate::ui::sidebar::script_tree::CopyScript;
+use crate::ui::sidebar::script_tree::{CopyScript, NewScript};
 use crate::ui::sidebar::outline_tree::{DeleteOutlineEntry, NewOutlineEntry, RenameOutlineEntry};
 use crate::ui::{ai_panel, dialog_ok_cancel_footer, editor, sidebar, status_bar, top_bar};
 use std::collections::HashMap;
@@ -46,6 +46,8 @@ pub struct Workspace {
     pub(crate) character_input: Option<(usize, Entity<InputState>)>,
     pub(crate) search_input: Option<Entity<InputState>>,
     pub(crate) ai_input: Option<Entity<TextareaState>>,
+    pub(crate) ai_renaming_session: bool,
+    pub(crate) ai_session_title_input: Option<Entity<InputState>>,
     pub(crate) outline_field_name_inputs: HashMap<String, Entity<InputState>>,
     pub(crate) outline_field_value_inputs: HashMap<String, Entity<TextareaState>>,
     _edit_subscriptions: Vec<Subscription>,
@@ -53,6 +55,7 @@ pub struct Workspace {
     _search_subscription: Option<Subscription>,
     _outline_subscriptions: Vec<Subscription>,
     _ai_input_subscription: Option<Subscription>,
+    _ai_session_title_subscription: Option<Subscription>,
     debounce_gen: u64,
     _debounce_task: Option<Task<()>>,
     _ai_task: Option<Task<()>>,
@@ -70,6 +73,8 @@ impl Workspace {
             character_input: None,
             search_input: None,
             ai_input: None,
+            ai_renaming_session: false,
+            ai_session_title_input: None,
             outline_field_name_inputs: HashMap::new(),
             outline_field_value_inputs: HashMap::new(),
             _edit_subscriptions: Vec::new(),
@@ -77,6 +82,7 @@ impl Workspace {
             _search_subscription: None,
             _outline_subscriptions: Vec::new(),
             _ai_input_subscription: None,
+            _ai_session_title_subscription: None,
             debounce_gen: 0,
             _debounce_task: None,
             _ai_task: None,
@@ -174,6 +180,63 @@ impl Workspace {
         self.ai_input = Some(input);
     }
 
+    pub(crate) fn ensure_ai_session_title_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ai_session_title_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("会话标题")
+                .default_value("")
+        });
+        self._ai_session_title_subscription = Some(cx.subscribe_in(&input, window, {
+            move |this, _state, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let title = this
+                        .ai_session_title_input
+                        .as_ref()
+                        .map(|i| i.read(cx).value().to_string())
+                        .unwrap_or_default();
+                    if let Err(err) = this
+                        .state
+                        .ai_rename_active_session(title.trim(), Utc::now())
+                    {
+                        this.state.ai.status_message = Some(format!("{err:#}"));
+                    }
+                    this.ai_renaming_session = false;
+                    if let Some(inp) = this.ai_session_title_input.clone() {
+                        inp.update(cx, |s, cx| s.set_value("", window, cx));
+                    }
+                    cx.notify();
+                }
+            }
+        }));
+        self.ai_session_title_input = Some(input);
+    }
+
+    pub(crate) fn begin_ai_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.ai.busy {
+            return;
+        }
+        self.ensure_ai_session_title_input(window, cx);
+        let title = self.state.ai.active_title();
+        if let Some(inp) = self.ai_session_title_input.clone() {
+            inp.update(cx, |s, cx| s.set_value(title, window, cx));
+        }
+        self.ai_renaming_session = true;
+    }
+
+    pub(crate) fn cancel_ai_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ai_renaming_session = false;
+        if let Some(inp) = self.ai_session_title_input.clone() {
+            inp.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
     /// 从 AI 面板发送：校验配置 → hydrate → 后台跑 Host → 回写提案。
     pub(crate) fn send_ai_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.ai.busy {
@@ -189,9 +252,11 @@ impl Workspace {
             return;
         }
 
+        let now = Utc::now();
+
         if let Err(err) = crate::ai::validate_ai_ready(self.state.ai_settings()) {
-            self.state.ai_push_user_message(&text);
-            self.state.ai_fail_run(err);
+            self.state.ai_push_user_message(&text, now);
+            self.state.ai_fail_run(err, now);
             input.update(cx, |s, cx| s.set_value("", window, cx));
             cx.notify();
             return;
@@ -200,21 +265,28 @@ impl Workspace {
         let settings = self.state.ai_settings().clone();
         let lean = crate::ai::lean_context_from_app(&self.state);
         let shared = crate::ai::hydrate_shared_ctx(&self.state);
+        let llm_history = self.state.ai.llm_messages().to_vec();
+        let last_lean_focus = self
+            .state
+            .ai
+            .active()
+            .and_then(|s| s.last_lean_focus.clone());
+        let stored_focus = crate::ai::stored_lean_focus_from_lean(&lean);
         let system_prompt = crate::ai::compose_system_prompt(
-            self.state.ai.agent,
+            self.state.ai.agent(),
             self.state.project.as_ref().map(|p| &p.ai_context),
             rai_l::agent::agent::FunctionCallAgent::<rai_l::llm::RaiLLM>::DEFAULT_SYSTEM_PROMPT,
         );
         let max_tokens = crate::ai::resolve_max_tokens(
-            self.state.ai.max_token_tier,
+            self.state.ai.max_token_tier(),
             &settings.provider,
         );
         let max_tool_rounds =
             crate::storage::clamp_max_tool_rounds(settings.max_tool_rounds);
 
-        self.state.ai_push_user_message(&text);
+        self.state.ai_push_user_message(&text, now);
         self.state.ai_mark_busy(true);
-        self.state.ai_begin_assistant_stream();
+        self.state.ai_begin_assistant_stream(now);
         input.update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
 
@@ -224,6 +296,7 @@ impl Workspace {
                 Done(
                     anyhow::Result<(
                         String,
+                        Vec<rai_l::llm::Message>,
                         crate::ai::ProposalStore,
                         Vec<crate::ai::AiUiCommand>,
                     )>,
@@ -241,7 +314,9 @@ impl Workspace {
                     rt.block_on(async move {
                         let llm = crate::ai::build_llm(&settings)?;
                         let mut host = crate::ai::AiSessionHost::from_llm(llm, shared, lean)
-                            .with_system_prompt(system_prompt);
+                            .with_system_prompt(system_prompt)
+                            .with_llm_history(llm_history)
+                            .with_last_lean_focus(last_lean_focus);
                         let tx_delta = tx;
                         let reply = host
                             .run_stream(
@@ -254,6 +329,7 @@ impl Workspace {
                                 },
                             )
                             .await?;
+                        let llm_out = host.llm_history().to_vec();
                         let (proposals, ui_commands) = {
                             let mut guard = host
                                 .ctx
@@ -263,7 +339,7 @@ impl Workspace {
                             let ui_commands = guard.take_ui_commands();
                             (proposals, ui_commands)
                         };
-                        anyhow::Ok((reply, proposals, ui_commands))
+                        anyhow::Ok((reply, llm_out, proposals, ui_commands))
                     })
                 })();
                 let _ = tx_done.send(StreamEvent::Done(result));
@@ -275,7 +351,8 @@ impl Workspace {
                     match rx.try_recv() {
                         Ok(StreamEvent::Delta(delta)) => {
                             this.update(cx, |this, cx| {
-                                this.state.ai_append_stream_delta(&delta);
+                                this.state
+                                    .ai_append_stream_delta(&delta, Utc::now());
                                 cx.notify();
                             })
                             .ok();
@@ -296,18 +373,21 @@ impl Workspace {
                 if let Some(run_result) = finished {
                     let _ = worker.join();
                     this.update(cx, |this, cx| {
+                        let now = Utc::now();
                         match run_result {
-                            Ok((reply, proposals, ui_commands)) => {
+                            Ok((reply, llm_history, proposals, ui_commands)) => {
                                 if let Err(err) = this.state.ai_ingest_host_result(
                                     reply,
+                                    llm_history,
                                     proposals,
                                     ui_commands,
-                                    Utc::now(),
+                                    stored_focus.clone(),
+                                    now,
                                 ) {
-                                    this.state.ai_fail_run(err);
+                                    this.state.ai_fail_run(err, now);
                                 }
                             }
-                            Err(err) => this.state.ai_fail_run(err),
+                            Err(err) => this.state.ai_fail_run(err, now),
                         }
                         cx.notify();
                     })
@@ -1612,6 +1692,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &NewChapter, window, cx| {
                 this.prompt_new_chapter(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewScript, window, cx| {
+                this.prompt_new_script(window, cx);
             }))
             .on_action(cx.listener(|this, _: &RenameNode, window, cx| {
                 this.prompt_rename(window, cx);

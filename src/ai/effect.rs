@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::ai::{AiIntent, IntentStatus, ToolReceipt};
@@ -5,15 +6,16 @@ use crate::ai::{AiIntent, IntentStatus, ToolReceipt};
 use super::mutator::ProjectMutator;
 
 /// 待用户确认或稍后应用的 AI 写意图。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proposal {
     pub intent: AiIntent,
     pub stale: bool,
 }
 
 /// 提案队列：`auto_apply` 关闭时由 EffectPolicy 写入。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProposalStore {
+    #[serde(default)]
     proposals: Vec<Proposal>,
 }
 

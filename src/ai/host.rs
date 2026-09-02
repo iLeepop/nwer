@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 use rai_l::agent::agent::FunctionCallAgent;
 use rai_l::agent::config::Config;
 use rai_l::agent::core::Agent;
-use rai_l::llm::{RaiLLM, Think};
+use rai_l::llm::{Message, RaiLLM, Think};
 use uuid::Uuid;
 
 use crate::ai::actions::action_prompt;
 use crate::ai::provider::{ChapterContext, ProjectContext};
 use crate::ai::tools::{build_all_tools, SharedCtx};
+use crate::ai::session::StoredLeanFocus;
 use crate::ai::{AiAction, SharedAiCtx};
 use crate::models::Block;
 
@@ -66,6 +67,8 @@ pub struct AiSessionHost<L> {
     lean: LeanContext,
     llm: L,
     system_prompt: String,
+    llm_history: Vec<Message>,
+    last_lean_focus: Option<StoredLeanFocus>,
 }
 
 impl<L: Think + Clone + Send> AiSessionHost<L> {
@@ -75,7 +78,23 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
             lean,
             llm,
             system_prompt: FunctionCallAgent::<RaiLLM>::DEFAULT_SYSTEM_PROMPT.to_string(),
+            llm_history: Vec::new(),
+            last_lean_focus: None,
         }
+    }
+
+    pub fn with_last_lean_focus(mut self, focus: Option<StoredLeanFocus>) -> Self {
+        self.last_lean_focus = focus;
+        self
+    }
+
+    pub fn with_llm_history(mut self, history: Vec<Message>) -> Self {
+        self.llm_history = history;
+        self
+    }
+
+    pub fn llm_history(&self) -> &[Message] {
+        &self.llm_history
     }
 
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
@@ -104,6 +123,17 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
         mut on_delta: impl FnMut(&str) + Send,
     ) -> anyhow::Result<String> {
         let tools = build_all_tools(self.ctx.clone());
+        let is_first_turn = self.llm_history.is_empty();
+        let current_focus = crate::ai::stored_lean_focus_from_lean(&self.lean);
+        let focus_changed =
+            !is_first_turn && crate::ai::lean_focus_changed(&self.last_lean_focus, &current_focus);
+        let message = compose_user_message_for_turn(
+            &self.lean,
+            action,
+            user_prompt,
+            is_first_turn,
+            focus_changed,
+        );
         let mut agent = FunctionCallAgent::from_parts(
             "nwer",
             self.system_prompt.as_str(),
@@ -113,11 +143,15 @@ impl<L: Think + Clone + Send> AiSessionHost<L> {
             self.llm.clone(),
             tools,
         );
-        let message = compose_user_message(&self.lean, action, user_prompt);
-        agent
+        for msg in self.llm_history.iter().cloned() {
+            agent.add_message(msg);
+        }
+        let reply = agent
             .run_stream(message, |delta| on_delta(delta))
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.llm_history = agent.core.history.clone();
+        Ok(reply)
     }
 }
 
@@ -169,6 +203,28 @@ fn compose_user_message(lean: &LeanContext, action: AiAction, user_prompt: &str)
         parts.push(user_prompt.to_string());
     }
     parts.join("\n\n")
+}
+
+/// 首轮或焦点变更时注入 lean context；其余轮仅用户文本。
+pub fn compose_user_message_for_turn(
+    lean: &LeanContext,
+    action: AiAction,
+    user_prompt: &str,
+    is_first_turn: bool,
+    focus_changed: bool,
+) -> String {
+    if is_first_turn {
+        compose_user_message(lean, action, user_prompt)
+    } else if focus_changed {
+        let lean_text = format_lean_context(lean);
+        if lean_text.is_empty() {
+            user_prompt.to_string()
+        } else {
+            format!("{lean_text}\n\n{user_prompt}")
+        }
+    } else {
+        user_prompt.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +309,48 @@ mod tests {
         );
         assert!(text.contains("第一章"), "应含焦点标题: {text}");
         assert!(text.contains("开篇选区"), "应含选区文本: {text}");
+    }
+
+    #[test]
+    fn compose_user_message_for_turn_skips_lean_on_follow_up() {
+        let lean = lean_ctx();
+        let first = compose_user_message_for_turn(&lean, AiAction::Chat, "写一段", true, false);
+        assert!(first.contains("测试项目"), "首轮应含 lean: {first}");
+        let second = compose_user_message_for_turn(&lean, AiAction::Chat, "继续", false, false);
+        assert_eq!(second, "继续");
+        let refocus = compose_user_message_for_turn(&lean, AiAction::Chat, "换章了", false, true);
+        assert!(refocus.contains("测试项目"), "焦点变更应含 lean: {refocus}");
+    }
+
+    #[tokio::test]
+    async fn host_preserves_history_across_two_runs() {
+        let fake = FakeLLM::new(vec![
+            ThinkOutput {
+                content: Some("第一轮回复".into()),
+                tool_calls: vec![],
+            },
+            ThinkOutput {
+                content: Some("记得你说了开篇".into()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut host = AiSessionHost::from_llm(fake.clone(), SharedAiCtx::new(false), lean_ctx());
+        host.run(AiAction::Chat, "开篇选区", RaiLLM::MAX_TOKENS_NORMAL, 8)
+            .await
+            .unwrap();
+        assert_eq!(host.llm_history().len(), 2);
+
+        host.run(AiAction::Chat, "我刚才说了什么", RaiLLM::MAX_TOKENS_NORMAL, 8)
+            .await
+            .unwrap();
+
+        let batches = fake.received.lock().unwrap();
+        assert_eq!(batches.len(), 2);
+        let second_batch = &batches[1];
+        let has_prior = second_batch
+            .iter()
+            .any(|m| format!("{m:?}").contains("开篇选区"));
+        assert!(has_prior, "第二轮应含第一轮 user 消息: {second_batch:?}");
     }
 
     #[tokio::test]
